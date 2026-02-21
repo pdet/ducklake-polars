@@ -119,7 +119,13 @@ class DuckLakeCatalogReader:
         return self._con
 
     def _sql(self, query: str) -> str:
-        """Translate ``?`` placeholders to the backend's parameter style."""
+        """Translate ``?`` placeholders to the backend's parameter style.
+
+        Only use on static SQL strings.  Do not apply to queries built
+        with f-strings containing database-sourced identifiers — those
+        could contain literal ``?`` characters that would be corrupted.
+        Use ``self._backend.placeholder`` directly instead.
+        """
         if self._backend.placeholder != "?":
             return query.replace("?", self._backend.placeholder)
         return query
@@ -441,14 +447,15 @@ class DuckLakeCatalogReader:
                 f'"{c.replace(chr(34), chr(34) + chr(34))}"' for c in column_names
             )
             safe_table = info.table_name.replace('"', '""')
+            ph = self._backend.placeholder
             try:
                 cursor = con.execute(
-                    self._sql(f"""
+                    f"""
                     SELECT {cols_sql}
                     FROM "{safe_table}"
-                    WHERE ? >= begin_snapshot
-                      AND (? < end_snapshot OR end_snapshot IS NULL)
-                    """),
+                    WHERE {ph} >= begin_snapshot
+                      AND ({ph} < end_snapshot OR end_snapshot IS NULL)
+                    """,
                     [snapshot_id, snapshot_id],
                 )
                 rows = cursor.fetchall()

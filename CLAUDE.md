@@ -33,9 +33,9 @@ src/ducklake_polars/
    private `PyLazyFrame.new_from_dataset_object()`.
 3. Polars calls `DuckLakeDataset.schema()` to get the table schema, and
    `DuckLakeDataset.to_dataset_scan()` to get the actual data.
-4. `to_dataset_scan()` opens a `DuckLakeCatalogReader` (SQLite read-only connection),
-   resolves the snapshot, finds data files/delete files, builds statistics, and
-   returns a `scan_parquet(sources, ...)` LazyFrame.
+4. `to_dataset_scan()` opens a `DuckLakeCatalogReader` (read-only connection via the
+   backend adapter), resolves the snapshot, finds data files/delete files, builds
+   statistics, and returns a `scan_parquet(sources, ...)` LazyFrame.
 5. Polars handles all query optimization (predicate pushdown, projection pushdown,
    file pruning via statistics, positional deletes via Iceberg-compatible delete files).
 
@@ -49,9 +49,9 @@ src/ducklake_polars/
 - These private APIs may change across Polars versions. If something breaks after
   a Polars upgrade, check these first.
 
-### DuckLake SQLite schema
+### DuckLake metadata schema
 
-The catalog is a SQLite database containing these tables (among others):
+The catalog database (SQLite or PostgreSQL) contains these tables (among others):
 
 - `ducklake_metadata` -- key-value pairs, notably `data_path`
 - `ducklake_snapshot` -- snapshot_id, schema_version, snapshot_time, next_file_id
@@ -107,8 +107,9 @@ pytest -n auto             # run in parallel
 pytest tests/test_types.py -v  # run specific file
 ```
 
-DuckDB is **only a test dependency**. Tests use DuckDB + the DuckLake extension + sqlite_scanner
-to create SQLite-backed catalogs in temp dirs, then read them back with ducklake-polars.
+DuckDB is **only a test dependency**. Tests use DuckDB + the DuckLake extension to create
+catalogs (SQLite-backed in temp dirs, PostgreSQL when `DUCKLAKE_PG_DSN` is set), then read
+them back with ducklake-polars.
 
 Test fixtures are in `tests/conftest.py`:
 - `ducklake_catalog` -- data inlining **disabled** (forces Parquet files). Used by most tests.

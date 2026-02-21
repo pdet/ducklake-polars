@@ -128,3 +128,95 @@ class TestPostgreSQLConnectWithoutPsycopg2:
         with patch.dict("sys.modules", {"psycopg2": None}):
             with pytest.raises(ImportError, match="psycopg2 is required"):
                 b.connect()
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQLBackend.is_table_not_found
+# ---------------------------------------------------------------------------
+
+class TestPostgreSQLIsTableNotFound:
+    def test_without_psycopg2(self):
+        """Returns False when psycopg2 is not installed."""
+        b = PostgreSQLBackend(connection_string="postgresql://localhost/db")
+        with patch.dict("sys.modules", {"psycopg2": None}):
+            assert b.is_table_not_found(Exception("anything")) is False
+
+    def test_matching_error(self):
+        """Returns True for ProgrammingError with pgcode 42P01."""
+        psycopg2 = pytest.importorskip("psycopg2")
+        b = PostgreSQLBackend(connection_string="postgresql://localhost/db")
+        # pgcode is readonly on psycopg2 exceptions, so subclass to set it
+        class FakeProgrammingError(psycopg2.ProgrammingError):
+            pgcode = "42P01"
+        assert b.is_table_not_found(FakeProgrammingError("relation does not exist")) is True
+
+    def test_wrong_pgcode(self):
+        """Returns False for ProgrammingError with a different pgcode."""
+        psycopg2 = pytest.importorskip("psycopg2")
+        b = PostgreSQLBackend(connection_string="postgresql://localhost/db")
+        class FakeProgrammingError(psycopg2.ProgrammingError):
+            pgcode = "42501"
+        assert b.is_table_not_found(FakeProgrammingError("permission denied")) is False
+
+    def test_non_programming_error(self):
+        """Returns False for non-ProgrammingError exceptions."""
+        pytest.importorskip("psycopg2")
+        b = PostgreSQLBackend(connection_string="postgresql://localhost/db")
+        assert b.is_table_not_found(ValueError("something")) is False
+
+
+# ---------------------------------------------------------------------------
+# _PsycopgConnectionWrapper
+# ---------------------------------------------------------------------------
+
+class TestPsycopgConnectionWrapper:
+    def test_execute_delegates_to_cursor(self):
+        from ducklake_polars._backend import _PsycopgConnectionWrapper
+        from unittest.mock import MagicMock
+
+        mock_con = MagicMock()
+        mock_cursor = MagicMock()
+        mock_con.cursor.return_value = mock_cursor
+
+        wrapper = _PsycopgConnectionWrapper(mock_con)
+        result = wrapper.execute("SELECT 1")
+        mock_cursor.execute.assert_called_once_with("SELECT 1")
+        assert result is mock_cursor
+
+    def test_execute_with_params(self):
+        from ducklake_polars._backend import _PsycopgConnectionWrapper
+        from unittest.mock import MagicMock
+
+        mock_con = MagicMock()
+        mock_cursor = MagicMock()
+        mock_con.cursor.return_value = mock_cursor
+
+        wrapper = _PsycopgConnectionWrapper(mock_con)
+        wrapper.execute("SELECT %s", [42])
+        mock_cursor.execute.assert_called_once_with("SELECT %s", [42])
+
+    def test_execute_none_params_no_args(self):
+        """params=None should call execute without params argument."""
+        from ducklake_polars._backend import _PsycopgConnectionWrapper
+        from unittest.mock import MagicMock
+
+        mock_con = MagicMock()
+        mock_cursor = MagicMock()
+        mock_con.cursor.return_value = mock_cursor
+
+        wrapper = _PsycopgConnectionWrapper(mock_con)
+        wrapper.execute("SELECT 1", None)
+        mock_cursor.execute.assert_called_once_with("SELECT 1")
+
+    def test_close_delegates(self):
+        from ducklake_polars._backend import _PsycopgConnectionWrapper
+        from unittest.mock import MagicMock
+
+        mock_con = MagicMock()
+        mock_cursor = MagicMock()
+        mock_con.cursor.return_value = mock_cursor
+
+        wrapper = _PsycopgConnectionWrapper(mock_con)
+        wrapper.close()
+        mock_cursor.close.assert_called_once()
+        mock_con.close.assert_called_once()

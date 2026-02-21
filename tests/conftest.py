@@ -69,16 +69,21 @@ class DuckLakeTestCatalog:
         import psycopg2
 
         con = psycopg2.connect(self.metadata_path)
-        con.autocommit = True
-        cur = con.cursor()
-        cur.execute(
-            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-        )
-        tables = [row[0] for row in cur.fetchall()]
-        for table in tables:
-            cur.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
-        cur.close()
-        con.close()
+        try:
+            con.autocommit = True
+            cur = con.cursor()
+            try:
+                cur.execute(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+                )
+                tables = [row[0] for row in cur.fetchall()]
+                for table in tables:
+                    safe = table.replace('"', '""')
+                    cur.execute(f'DROP TABLE IF EXISTS "{safe}" CASCADE')
+            finally:
+                cur.close()
+        finally:
+            con.close()
 
     def execute(self, sql: str, params: list[Any] | None = None) -> Any:
         if params is not None:
@@ -102,20 +107,24 @@ class DuckLakeTestCatalog:
             import sqlite3
 
             con = sqlite3.connect(self.metadata_path)
-            result = con.execute(sql, params or []).fetchone()
-            con.close()
-            return result
+            try:
+                return con.execute(sql, params or []).fetchone()
+            finally:
+                con.close()
         else:
             import psycopg2
 
             con = psycopg2.connect(self.metadata_path)
-            con.autocommit = True
-            cur = con.cursor()
-            cur.execute(sql.replace("?", "%s"), params or [])
-            result = cur.fetchone()
-            cur.close()
-            con.close()
-            return result
+            try:
+                con.autocommit = True
+                cur = con.cursor()
+                try:
+                    cur.execute(sql.replace("?", "%s"), params or [])
+                    return cur.fetchone()
+                finally:
+                    cur.close()
+            finally:
+                con.close()
 
     def close(self) -> None:
         """Close the DuckDB connection, releasing the file lock."""

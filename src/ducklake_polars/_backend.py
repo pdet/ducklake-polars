@@ -25,6 +25,36 @@ class SQLiteBackend:
         return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc)
 
 
+class _PsycopgConnectionWrapper:
+    """
+    Wraps a psycopg2 connection to provide a sqlite3-compatible interface.
+
+    psycopg2 connections require ``cursor().execute()`` while sqlite3
+    connections support ``connection.execute()`` directly.  This wrapper
+    bridges the difference so ``_catalog.py`` can use the same calling
+    convention for both backends.
+
+    A single cursor is reused across calls.  This is safe because
+    ``_catalog.py`` always consumes results (via ``fetchone``/``fetchall``)
+    before the next ``execute`` call, and connections are single-threaded.
+    """
+
+    def __init__(self, con: Any) -> None:
+        self._con = con
+        self._cur = con.cursor()
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        if params is None:
+            self._cur.execute(sql)
+        else:
+            self._cur.execute(sql, params)
+        return self._cur
+
+    def close(self) -> None:
+        self._cur.close()
+        self._con.close()
+
+
 @dataclass
 class PostgreSQLBackend:
     """PostgreSQL metadata backend."""
@@ -44,7 +74,7 @@ class PostgreSQLBackend:
             raise ImportError(msg) from None
         con = psycopg2.connect(self.connection_string)
         con.set_session(readonly=True, autocommit=True)
-        return con
+        return _PsycopgConnectionWrapper(con)
 
     def is_table_not_found(self, exc: BaseException) -> bool:
         """Check if an exception indicates a missing table (pgcode 42P01)."""
@@ -70,5 +100,5 @@ def create_backend(path: str) -> SQLiteBackend | PostgreSQLBackend:
         or "host=" in lower
         or "dbname=" in lower
     ):
-        return PostgreSQLBackend(connection_string=path)
+        return PostgreSQLBackend(connection_string=path.strip())
     return SQLiteBackend(path=path)
