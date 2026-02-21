@@ -398,6 +398,148 @@ class DuckLakeCatalogReader:
             for r in rows
         ]
 
+    def get_all_snapshots(self) -> list[tuple]:
+        """Get all snapshots ordered by snapshot_id."""
+        con = self._connect()
+        return con.execute("""
+            SELECT snapshot_id, schema_version, snapshot_time
+            FROM ducklake_snapshot
+            ORDER BY snapshot_id
+        """).fetchall()
+
+    def get_all_schemas(self, snapshot_id: int) -> list[tuple]:
+        """Get all schemas visible at a given snapshot."""
+        con = self._connect()
+        return con.execute(
+            self._sql("""
+            SELECT schema_id, schema_name, path, path_is_relative
+            FROM ducklake_schema
+            WHERE begin_snapshot <= ?
+              AND (end_snapshot IS NULL OR end_snapshot > ?)
+            ORDER BY schema_id
+            """),
+            [snapshot_id, snapshot_id],
+        ).fetchall()
+
+    def get_all_tables(self, schema_id: int, snapshot_id: int) -> list[tuple]:
+        """Get all tables in a schema visible at a given snapshot."""
+        con = self._connect()
+        return con.execute(
+            self._sql("""
+            SELECT table_id, table_name
+            FROM ducklake_table
+            WHERE schema_id = ?
+              AND begin_snapshot <= ?
+              AND (end_snapshot IS NULL OR end_snapshot > ?)
+            ORDER BY table_id
+            """),
+            [schema_id, snapshot_id, snapshot_id],
+        ).fetchall()
+
+    def get_all_metadata(self) -> list[tuple]:
+        """Get all key-value pairs from ducklake_metadata."""
+        con = self._connect()
+        return con.execute(
+            "SELECT key, value FROM ducklake_metadata"
+        ).fetchall()
+
+    def get_data_files_in_range_with_snapshot(self, table_id: int, start_snapshot: int, end_snapshot: int) -> list[tuple[FileInfo, int]]:
+        """Get data files added between two snapshots, with their begin_snapshot.
+
+        Returns list of (FileInfo, begin_snapshot) tuples.
+        """
+        con = self._connect()
+        rows = con.execute(
+            self._sql("""
+            SELECT data_file_id, path, path_is_relative, record_count,
+                   file_size_bytes, row_id_start, partition_id, mapping_id,
+                   begin_snapshot
+            FROM ducklake_data_file
+            WHERE table_id = ?
+              AND begin_snapshot > ?
+              AND begin_snapshot <= ?
+            ORDER BY file_order, data_file_id
+            """),
+            [table_id, start_snapshot, end_snapshot],
+        ).fetchall()
+        return [
+            (
+                FileInfo(
+                    data_file_id=r[0],
+                    path=r[1],
+                    path_is_relative=bool(r[2]) if r[2] is not None else True,
+                    record_count=r[3],
+                    file_size_bytes=r[4],
+                    row_id_start=r[5],
+                    partition_id=r[6],
+                    mapping_id=r[7],
+                ),
+                r[8],
+            )
+            for r in rows
+        ]
+
+    def get_delete_files_in_range(self, table_id: int, start_snapshot: int, end_snapshot: int) -> list[tuple[DeleteFileInfo, int]]:
+        """Get delete files added between two snapshots (start exclusive, end inclusive).
+
+        Returns list of (DeleteFileInfo, begin_snapshot) tuples.
+        """
+        con = self._connect()
+        rows = con.execute(
+            self._sql("""
+            SELECT delete_file_id, data_file_id, path, path_is_relative,
+                   delete_count, begin_snapshot
+            FROM ducklake_delete_file
+            WHERE table_id = ?
+              AND begin_snapshot > ?
+              AND begin_snapshot <= ?
+            ORDER BY delete_file_id
+            """),
+            [table_id, start_snapshot, end_snapshot],
+        ).fetchall()
+        return [
+            (
+                DeleteFileInfo(
+                    delete_file_id=r[0],
+                    data_file_id=r[1],
+                    path=r[2],
+                    path_is_relative=bool(r[3]) if r[3] is not None else True,
+                    delete_count=r[4],
+                ),
+                r[5],
+            )
+            for r in rows
+        ]
+
+    def get_data_file_by_id(self, data_file_id: int) -> FileInfo | None:
+        """Get a specific data file by its ID, regardless of snapshot visibility.
+
+        This intentionally does not filter on end_snapshot because the change
+        data feed needs to read data files that may have been logically removed.
+        """
+        con = self._connect()
+        row = con.execute(
+            self._sql("""
+            SELECT data_file_id, path, path_is_relative, record_count,
+                   file_size_bytes, row_id_start, partition_id, mapping_id
+            FROM ducklake_data_file
+            WHERE data_file_id = ?
+            """),
+            [data_file_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return FileInfo(
+            data_file_id=row[0],
+            path=row[1],
+            path_is_relative=bool(row[2]) if row[2] is not None else True,
+            record_count=row[3],
+            file_size_bytes=row[4],
+            row_id_start=row[5],
+            partition_id=row[6],
+            mapping_id=row[7],
+        )
+
     def get_inlined_data_tables(self, table_id: int) -> list[InlinedDataTableInfo]:
         """Get inlined data table info for a table."""
         con = self._connect()

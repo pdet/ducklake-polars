@@ -11,16 +11,17 @@ DuckLake metadata from SQLite (via Python's stdlib `sqlite3`) or PostgreSQL (via
 scans the underlying Parquet data files through Polars' native Parquet reader. There is **no DuckDB
 runtime dependency** -- DuckDB is only used in tests to create catalog fixtures.
 
-Public API: `scan_ducklake()` (LazyFrame) and `read_ducklake()` (DataFrame), exported from
-`ducklake_polars/__init__.py`.
+Public API: `scan_ducklake()` (LazyFrame), `read_ducklake()` (DataFrame), and `DuckLakeCatalog`
+(catalog inspection), exported from `ducklake_polars/__init__.py`.
 
 ## Architecture
 
 ```
 src/ducklake_polars/
-    __init__.py      Public API: scan_ducklake(), read_ducklake()
+    __init__.py      Public API: scan_ducklake(), read_ducklake(), DuckLakeCatalog
     _backend.py      Backend adapters: SQLiteBackend, PostgreSQLBackend, create_backend()
     _catalog.py      Metadata reader (snapshots, tables, columns, files, stats, inlined data)
+    _catalog_api.py  DuckLakeCatalog: high-level catalog inspection API
     _dataset.py      Polars PythonDatasetProvider implementation (DuckLakeDataset)
     _schema.py       DuckLake type string -> Polars DataType mapping
     _stats.py        Column statistics builder for file pruning
@@ -132,8 +133,8 @@ SQLite file lock. For tests that need direct metadata access after closing, use
 Note: PostgreSQL tests should not be run in parallel (`pytest-xdist`) since they share a
 single database.
 
-Current test status (SQLite only): **148 passed, 5 xfailed** (hugeint, uhugeint, interval,
-map, column rename).
+Current test status: **284 passed, 1 skipped, 10 xfailed** (both SQLite and PostgreSQL backends).
+Known xfails: HUGEINT (2), UHUGEINT (2), INTERVAL (2), MAP (2), column RENAME (2).
 
 ## Known limitations and future work
 
@@ -175,6 +176,7 @@ map, column rename).
 - Public API. Validates `snapshot_version`/`snapshot_time` mutual exclusivity.
 - Accepts `str | Path` for path arguments (uses `os.fspath()`).
 - Uses Polars private internals: `polars._plr.PyLazyFrame`, `polars._utils.wrap.wrap_ldf`.
+- `DuckLakeCatalog` is imported directly from `_catalog_api`.
 
 ### `_backend.py`
 - `SQLiteBackend` / `PostgreSQLBackend` -- dataclasses handling connection creation, parameter
@@ -187,10 +189,24 @@ map, column rename).
 - `_sql()` helper translates `?` placeholders to the backend's style.
 - Key methods: `get_current_snapshot()`, `get_snapshot_at_version()`, `get_snapshot_at_time()`,
   `get_table()`, `get_columns()`, `get_all_columns()`, `get_data_files()`, `get_delete_files()`,
-  `get_column_stats()`, `read_inlined_data()`.
+  `get_column_stats()`, `read_inlined_data()`, `get_all_snapshots()`, `get_all_schemas()`,
+  `get_all_tables()`, `get_all_metadata()`, `get_data_files_in_range()`,
+  `get_data_files_in_range_with_snapshot()`, `get_delete_files_in_range()`, `get_data_file_by_id()`.
 - `resolve_data_file_path()` builds full paths: `data_path / schema_path / table_path / file_path`.
 - `except Exception` + `backend.is_table_not_found()` in `get_inlined_data_tables` and
   `read_inlined_data` handles both SQLite and PostgreSQL missing-table errors.
+
+### `_catalog_api.py`
+- `DuckLakeCatalog` -- high-level catalog inspection class. All methods return `pl.DataFrame`
+  (except `current_snapshot()` which returns `int`).
+- Creates a fresh `DuckLakeCatalogReader` per method call (stateless).
+- **Metadata methods**: `snapshots()`, `current_snapshot()`, `table_info()`, `list_files()`,
+  `list_schemas()`, `list_tables()`, `options()`, `settings()`.
+- **Change data feed**: `table_insertions(table, start, end)` reads Parquet data files added
+  in the snapshot range. `table_deletions(table, start, end)` reads delete files and extracts
+  deleted rows from data files. `table_changes(table, start, end)` combines both and detects
+  updates (same-snapshot insert + delete → `update_preimage` / `update_postimage`).
+- Supports context manager protocol (no-op cleanup since readers are per-method).
 
 ### `_dataset.py`
 - `DuckLakeDataset` -- dataclass implementing PythonDatasetProvider.

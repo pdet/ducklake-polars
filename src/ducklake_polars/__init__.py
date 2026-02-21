@@ -11,7 +11,9 @@ if TYPE_CHECKING:
 
     import polars as pl
 
-__all__ = ["scan_ducklake", "read_ducklake"]
+from ducklake_polars._catalog_api import DuckLakeCatalog
+
+__all__ = ["scan_ducklake", "read_ducklake", "DuckLakeCatalog"]
 
 
 def scan_ducklake(
