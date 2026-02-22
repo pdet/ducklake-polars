@@ -50,9 +50,14 @@ def _read_with_duckdb(metadata_path, data_path, table_name):
         f"ATTACH 'ducklake:sqlite:{metadata_path}' AS ducklake "
         f"(DATA_PATH '{data_path}', DATA_INLINING_ROW_LIMIT 0)"
     )
-    result = con.execute(f'SELECT * FROM ducklake."{table_name}"').pl()
+    cursor = con.execute(f'SELECT * FROM ducklake."{table_name}"')
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
     con.close()
-    return result
+    if not rows:
+        return pl.DataFrame({c: [] for c in columns})
+    data = {c: [r[i] for r in rows] for i, c in enumerate(columns)}
+    return pl.DataFrame(data)
 
 
 # ---------------------------------------------------------------------------
