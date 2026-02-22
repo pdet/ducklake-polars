@@ -92,3 +92,154 @@ class TestTimeTravel:
 
         with pytest.raises(ValueError, match="No snapshot found"):
             read_ducklake(cat.metadata_path, "test", snapshot_time="2000-01-01T00:00:00")
+
+
+class TestTimeTravelDroppedTable:
+    """Test time travel behaviour with dropped tables."""
+
+    def test_read_dropped_table_at_prior_version(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
+        cat.execute("INSERT INTO ducklake.test VALUES (1), (2), (3)")
+        v1 = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("DROP TABLE ducklake.test")
+        cat.close()
+
+        # The table existed at v1, so reading at that version should return data
+        result = read_ducklake(cat.metadata_path, "test", snapshot_version=v1)
+        assert result.shape[0] == 3
+        assert sorted(result["a"].to_list()) == [1, 2, 3]
+
+    def test_read_dropped_table_at_latest_fails(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
+        cat.execute("INSERT INTO ducklake.test VALUES (1)")
+        cat.execute("DROP TABLE ducklake.test")
+        cat.close()
+
+        # The table is dropped at the latest snapshot, so reading should fail
+        with pytest.raises(Exception):
+            read_ducklake(cat.metadata_path, "test")
+
+
+class TestTimeTravelEmptyTable:
+    """Test time travel with empty tables (created but no data inserted yet)."""
+
+    def test_read_at_creation_snapshot(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE TABLE ducklake.test (a INTEGER, b VARCHAR)")
+        v_create = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("INSERT INTO ducklake.test VALUES (1, 'hello'), (2, 'world')")
+        cat.close()
+
+        # At v_create, table exists but has no data yet
+        result = read_ducklake(cat.metadata_path, "test", snapshot_version=v_create)
+        assert result.shape[0] == 0
+        assert "a" in result.columns
+        assert "b" in result.columns
+
+    def test_read_before_table_exists(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        # Capture snapshot before the table is created
+        # We need at least one snapshot to exist, so create a dummy table first
+        cat.execute("CREATE TABLE ducklake.dummy (x INTEGER)")
+        v0 = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
+        cat.execute("INSERT INTO ducklake.test VALUES (1)")
+        cat.close()
+
+        # Table "test" did not exist at v0, so reading should fail
+        with pytest.raises(Exception):
+            read_ducklake(cat.metadata_path, "test", snapshot_version=v0)
+
+
+class TestTimeTravelWithSchema:
+    """Test time travel with non-default schemas."""
+
+    def test_time_travel_non_default_schema(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE SCHEMA ducklake.s1")
+        cat.execute("CREATE TABLE ducklake.s1.test (a INTEGER)")
+        cat.execute("INSERT INTO ducklake.s1.test VALUES (1), (2)")
+        snap = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("INSERT INTO ducklake.s1.test VALUES (3), (4)")
+        cat.close()
+
+        # Read at old snapshot: should return only first batch
+        result_old = read_ducklake(cat.metadata_path, "test", schema="s1", snapshot_version=snap)
+        assert result_old.shape[0] == 2
+        assert sorted(result_old["a"].to_list()) == [1, 2]
+
+        # Read at latest: should return all rows
+        result_latest = read_ducklake(cat.metadata_path, "test", schema="s1")
+        assert result_latest.shape[0] == 4
+        assert sorted(result_latest["a"].to_list()) == [1, 2, 3, 4]
+
+    def test_read_from_non_default_schema(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE SCHEMA ducklake.s1")
+        cat.execute("CREATE TABLE ducklake.s1.test (a INTEGER, b VARCHAR)")
+        cat.execute("INSERT INTO ducklake.s1.test VALUES (10, 'alpha'), (20, 'beta')")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test", schema="s1")
+        assert result.shape[0] == 2
+        assert sorted(result["a"].to_list()) == [10, 20]
+        assert sorted(result["b"].to_list()) == ["alpha", "beta"]
+
+
+class TestTimeTravelWithComplexTypes:
+    """Test time travel with complex column types (structs, lists)."""
+
+    def test_time_travel_with_struct(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE TABLE ducklake.test (id INTEGER, s STRUCT(x INTEGER, y VARCHAR))")
+        cat.execute("INSERT INTO ducklake.test VALUES (1, {'x': 10, 'y': 'a'})")
+        snap = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("INSERT INTO ducklake.test VALUES (2, {'x': 20, 'y': 'b'})")
+        cat.close()
+
+        # Read at old snapshot: only first struct row
+        result_old = read_ducklake(cat.metadata_path, "test", snapshot_version=snap)
+        assert result_old.shape[0] == 1
+        assert result_old["id"].to_list() == [1]
+        assert result_old["s"].struct.field("x").to_list() == [10]
+        assert result_old["s"].struct.field("y").to_list() == ["a"]
+
+        # Read at latest: all struct rows
+        result_latest = read_ducklake(cat.metadata_path, "test")
+        assert result_latest.shape[0] == 2
+        assert sorted(result_latest["id"].to_list()) == [1, 2]
+
+    def test_time_travel_with_list(self, ducklake_catalog):
+        cat = ducklake_catalog
+
+        cat.execute("CREATE TABLE ducklake.test (id INTEGER, vals INTEGER[])")
+        cat.execute("INSERT INTO ducklake.test VALUES (1, [10, 20, 30])")
+        snap = cat.fetchone("SELECT * FROM ducklake_current_snapshot('ducklake')")[0]
+
+        cat.execute("INSERT INTO ducklake.test VALUES (2, [40, 50])")
+        cat.close()
+
+        # Read at old snapshot: only first list row
+        result_old = read_ducklake(cat.metadata_path, "test", snapshot_version=snap)
+        assert result_old.shape[0] == 1
+        assert result_old["id"].to_list() == [1]
+        assert result_old["vals"].to_list() == [[10, 20, 30]]
+
+        # Read at latest: all list rows
+        result_latest = read_ducklake(cat.metadata_path, "test")
+        assert result_latest.shape[0] == 2
+        assert sorted(result_latest["id"].to_list()) == [1, 2]

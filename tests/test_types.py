@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
+
 import polars as pl
 import pytest
 
-from ducklake_polars import read_ducklake
+from ducklake_polars import read_ducklake, scan_ducklake
 
 
 class TestScalarTypes:
@@ -427,3 +429,203 @@ class TestMixedColumns:
             "h": pl.UInt64,
         }
         assert result.row(0) == (1, 2, 3, 4, 5, 6, 7, 8)
+
+
+class TestFloatEdgeCases:
+    """Test float edge cases: NaN, infinity, and filtering behavior."""
+
+    def test_float_nan(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a FLOAT, b DOUBLE)")
+        cat.execute("INSERT INTO ducklake.test VALUES ('NaN'::FLOAT, 'NaN'::DOUBLE)")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (1, 2)
+        assert math.isnan(result["a"][0])
+        assert math.isnan(result["b"][0])
+
+    def test_float_infinity(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a FLOAT, b DOUBLE)")
+        cat.execute(
+            "INSERT INTO ducklake.test VALUES ('inf'::FLOAT, '-inf'::DOUBLE)"
+        )
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (1, 2)
+        assert math.isinf(result["a"][0]) and result["a"][0] > 0
+        assert math.isinf(result["b"][0]) and result["b"][0] < 0
+
+    def test_float_nan_filter(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a FLOAT)")
+        # Two separate inserts to create two Parquet files
+        cat.execute("INSERT INTO ducklake.test VALUES (1.0), (2.0), (3.0)")
+        cat.execute("INSERT INTO ducklake.test VALUES ('NaN'::FLOAT), (-1.0)")
+        cat.close()
+
+        result = (
+            scan_ducklake(cat.metadata_path, "test")
+            .filter(pl.col("a") > 0)
+            .collect()
+        )
+        result = result.sort("a")
+        # NaN should NOT match > 0
+        assert result["a"].to_list() == [1.0, 2.0, 3.0]
+
+    def test_float_infinity_filter(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a FLOAT)")
+        # Two separate inserts to create two Parquet files
+        cat.execute("INSERT INTO ducklake.test VALUES (1.0), (50.0)")
+        cat.execute("INSERT INTO ducklake.test VALUES ('inf'::FLOAT), (99.0)")
+        cat.close()
+
+        result = (
+            scan_ducklake(cat.metadata_path, "test")
+            .filter(pl.col("a") < 100)
+            .collect()
+        )
+        result = result.sort("a")
+        # inf should be excluded by < 100
+        assert result["a"].to_list() == [1.0, 50.0, 99.0]
+
+
+class TestTimestampEdgeCases:
+    """Test timestamp edge cases: infinity values."""
+
+    def test_timestamp_infinity(self, ducklake_catalog):
+        import datetime
+
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a TIMESTAMP)")
+        cat.execute(
+            "INSERT INTO ducklake.test VALUES "
+            "('2024-01-15 10:30:00'), "
+            "('infinity'::TIMESTAMP), "
+            "('-infinity'::TIMESTAMP)"
+        )
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (3, 1)
+        # Polars represents infinity timestamps as extreme microsecond values
+        # which can panic when converting to Python datetimes via to_list().
+        # Instead, verify using the underlying physical (integer) representation.
+        phys = result["a"].to_physical()
+        phys_list = sorted(phys.to_list())
+        assert len(phys_list) == 3
+        # The three values should be: -infinity (min), normal, +infinity (max)
+        # The middle value is the normal timestamp; the extremes are the infinities.
+        # Verify the extremes are far apart from the middle value (at least 100 years).
+        hundred_years_us = 100 * 365 * 24 * 3600 * 1_000_000
+        assert phys_list[1] - phys_list[0] > hundred_years_us
+        assert phys_list[2] - phys_list[1] > hundred_years_us
+
+
+class TestNullsInComplexTypes:
+    """Test null handling within complex/nested types."""
+
+    def test_list_with_null_elements(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a INTEGER[])")
+        cat.execute("INSERT INTO ducklake.test VALUES ([1, NULL, 3]), (NULL)")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (2, 1)
+        values = result["a"].to_list()
+        # First row: list with a null element
+        assert values[0] == [1, None, 3]
+        # Second row: entire list is null
+        assert values[1] is None
+
+    def test_struct_with_null_fields(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a STRUCT(i INTEGER, j INTEGER))")
+        cat.execute(
+            "INSERT INTO ducklake.test VALUES ({'i': NULL, 'j': 3}), (NULL)"
+        )
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (2, 1)
+        values = result["a"].to_list()
+        # First row: struct with a null field
+        assert values[0] == {"i": None, "j": 3}
+        # Second row: entire struct is null
+        # Polars represents a fully-null struct as None, not {"i": None, "j": None}
+        assert values[1] is None
+
+    def test_list_with_null_and_filter(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (id INTEGER, a INTEGER[])")
+        # Two separate inserts to create two Parquet files
+        cat.execute("INSERT INTO ducklake.test VALUES (1, [1, NULL, 3]), (2, NULL)")
+        cat.execute("INSERT INTO ducklake.test VALUES (3, [4, 5]), (4, [NULL])")
+        cat.close()
+
+        result = (
+            scan_ducklake(cat.metadata_path, "test")
+            .filter(pl.col("id") >= 2)
+            .collect()
+        )
+        result = result.sort("id")
+        assert result.shape == (3, 2)
+        assert result["id"].to_list() == [2, 3, 4]
+        list_values = result["a"].to_list()
+        assert list_values[0] is None
+        assert list_values[1] == [4, 5]
+        assert list_values[2] == [None]
+
+
+class TestStringEdgeCases:
+    """Test string edge cases: null bytes, empty strings."""
+
+    def test_varchar_null_byte(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a VARCHAR)")
+        # Insert a string containing a null byte
+        cat.execute("INSERT INTO ducklake.test VALUES (chr(0) || 'abc')")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (1, 1)
+        value = result["a"][0]
+        assert chr(0) in value
+        assert "abc" in value
+
+    def test_varchar_empty_and_null(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a VARCHAR)")
+        cat.execute("INSERT INTO ducklake.test VALUES (''), (NULL), ('hello')")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        result = result.sort("a", nulls_last=True)
+        assert result.shape == (3, 1)
+        values = result["a"].to_list()
+        # Empty string, normal string, and null are all distinct
+        assert "" in values
+        assert "hello" in values
+        assert None in values
+        # Verify they are truly distinct
+        assert values.count("") == 1
+        assert values.count(None) == 1
+        assert values.count("hello") == 1
+
+
+class TestVariantType:
+    """Test VARIANT type handling."""
+
+    @pytest.mark.xfail(reason="VARIANT type not supported by Polars")
+    def test_variant_type(self, ducklake_catalog):
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (a VARIANT)")
+        cat.execute("INSERT INTO ducklake.test VALUES (1), ('hello'), (3.14)")
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (3, 1)

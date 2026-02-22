@@ -104,6 +104,9 @@ class ColumnHistoryEntry:
     column_name: str
     begin_snapshot: int
     end_snapshot: int | None
+    parent_column: int | None = None
+    column_type: str = ""
+    column_order: int = 0
 
 
 @dataclass
@@ -457,14 +460,17 @@ class DuckLakeCatalogReader:
         ]
 
     def get_column_history(self, table_id: int) -> list[ColumnHistoryEntry]:
-        """Get all column definitions across all snapshots (for rename detection)."""
+        """Get all column definitions across all snapshots (for rename detection).
+
+        Includes both top-level and child columns (for struct field rename detection).
+        """
         con = self._connect()
         rows = con.execute(
             self._sql("""
-            SELECT column_id, column_name, begin_snapshot, end_snapshot
+            SELECT column_id, column_name, begin_snapshot, end_snapshot,
+                   parent_column, column_type, column_order
             FROM ducklake_column
             WHERE table_id = ?
-              AND parent_column IS NULL
             ORDER BY column_id, begin_snapshot
             """),
             [table_id],
@@ -475,6 +481,9 @@ class DuckLakeCatalogReader:
                 column_name=r[1],
                 begin_snapshot=r[2],
                 end_snapshot=r[3],
+                parent_column=r[4],
+                column_type=r[5],
+                column_order=r[6],
             )
             for r in rows
         ]

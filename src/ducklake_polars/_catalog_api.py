@@ -41,7 +41,7 @@ class DuckLakeCatalog:
 
     def __init__(self, path: str | Path, *, data_path: str | Path | None = None) -> None:
         self._metadata_path = os.fspath(path)
-        self._data_path_override = os.fspath(data_path) if data_path else None
+        self._data_path_override = os.fspath(data_path) if data_path is not None else None
 
     @staticmethod
     def _build_cdf_schema(all_columns: list, extra_prefix: list[tuple[str, pl.DataType]] | None = None) -> dict[str, pl.DataType]:

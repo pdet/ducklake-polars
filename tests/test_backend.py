@@ -12,6 +12,7 @@ from ducklake_polars._backend import (
     SQLiteBackend,
     create_backend,
 )
+from ducklake_polars._catalog import SUPPORTED_DUCKLAKE_VERSIONS
 
 
 # ---------------------------------------------------------------------------
