@@ -204,6 +204,79 @@ def _parse_single_field(field_str: str) -> tuple[str, str]:
     return name, type_str
 
 
+# Reverse mapping: Polars DataType → DuckDB internal type string (lowercase)
+_POLARS_TO_DUCKDB: dict[type, str] = {
+    pl.Boolean: "boolean",
+    pl.Int8: "int8",
+    pl.Int16: "int16",
+    pl.Int32: "int32",
+    pl.Int64: "int64",
+    pl.Int128: "int128",
+    pl.UInt8: "uint8",
+    pl.UInt16: "uint16",
+    pl.UInt32: "uint32",
+    pl.UInt64: "uint64",
+    pl.UInt128: "uint128",
+    pl.Float32: "float32",
+    pl.Float64: "float64",
+    pl.String: "varchar",
+    pl.Utf8: "varchar",
+    pl.Binary: "blob",
+    pl.Date: "date",
+    pl.Time: "time",
+    pl.Duration: "interval",
+}
+
+
+def polars_type_to_duckdb(dtype: pl.DataType) -> str:
+    """
+    Convert a Polars DataType to a DuckDB internal type string.
+
+    Returns lowercase type strings as stored in ``ducklake_column.column_type``.
+    For compound types (List, Struct), returns the parent type string;
+    children must be registered separately via the column hierarchy.
+    """
+    base = type(dtype)
+
+    # Simple scalar types
+    result = _POLARS_TO_DUCKDB.get(base)
+    if result is not None:
+        return result
+
+    # Decimal
+    if base is pl.Decimal:
+        p = dtype.precision  # type: ignore[attr-defined]
+        s = dtype.scale  # type: ignore[attr-defined]
+        if p is None:
+            p = 38
+        if s is None:
+            s = 0
+        return f"decimal({p},{s})"
+
+    # Datetime — map based on time unit and timezone
+    if base is pl.Datetime:
+        tz = dtype.time_zone  # type: ignore[attr-defined]
+        if tz is not None:
+            return "timestamp with time zone"
+        tu = dtype.time_unit  # type: ignore[attr-defined]
+        if tu == "ms":
+            return "timestamp_ms"
+        if tu == "ns":
+            return "timestamp_ns"
+        return "timestamp"
+
+    # Compound types — return parent type string only
+    if base is pl.List:
+        return "list"
+    if base is pl.Struct:
+        return "struct"
+    if base is pl.Array:
+        return "list"
+
+    msg = f"Cannot map Polars type {dtype} to DuckDB type"
+    raise ValueError(msg)
+
+
 def resolve_column_type(
     column_id: int,
     column_type: str,

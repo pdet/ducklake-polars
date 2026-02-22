@@ -20,6 +20,11 @@ class SQLiteBackend:
         abs_path = os.path.abspath(self.path)
         return sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
 
+    def connect_writable(self) -> sqlite3.Connection:
+        """Open a read-write SQLite connection."""
+        abs_path = os.path.abspath(self.path)
+        return sqlite3.connect(abs_path)
+
     def is_table_not_found(self, exc: BaseException) -> bool:
         """Check if an exception indicates a missing table."""
         return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc)
