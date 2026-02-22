@@ -22,6 +22,11 @@ __all__ = [
     "update_ducklake",
     "alter_ducklake_add_column",
     "alter_ducklake_drop_column",
+    "alter_ducklake_rename_column",
+    "drop_ducklake_table",
+    "create_ducklake_schema",
+    "drop_ducklake_schema",
+    "rename_ducklake_table",
     "DuckLakeCatalog",
 ]
 
@@ -432,3 +437,193 @@ def alter_ducklake_drop_column(
 
     with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
         writer.drop_column(table, col_name, schema_name=schema)
+
+
+def alter_ducklake_rename_column(
+    path: str | Path,
+    table: str,
+    old_col_name: str,
+    new_col_name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None:
+    """
+    Rename a column in a DuckLake table.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Currently only SQLite backends are supported for writes.
+    table
+        Name of the table to alter.
+    old_col_name
+        Current name of the column.
+    new_col_name
+        New name for the column.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table or column does not exist, or if the new name
+        already exists.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.rename_column(
+            table, old_col_name, new_col_name, schema_name=schema
+        )
+
+
+def drop_ducklake_table(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None:
+    """
+    Drop a table from a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Currently only SQLite backends are supported for writes.
+    table
+        Name of the table to drop.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table does not exist.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.drop_table(table, schema_name=schema)
+
+
+def create_ducklake_schema(
+    path: str | Path,
+    schema_name: str,
+    *,
+    data_path: str | Path | None = None,
+) -> None:
+    """
+    Create a new schema in a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Currently only SQLite backends are supported for writes.
+    schema_name
+        Name of the schema to create.
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the schema already exists.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.create_schema(schema_name)
+
+
+def drop_ducklake_schema(
+    path: str | Path,
+    schema_name: str,
+    *,
+    cascade: bool = False,
+    data_path: str | Path | None = None,
+) -> None:
+    """
+    Drop a schema from a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Currently only SQLite backends are supported for writes.
+    schema_name
+        Name of the schema to drop.
+    cascade
+        If True, drop all tables in the schema first.
+        If False (default), raise if the schema contains tables.
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the schema does not exist or contains tables (when cascade=False).
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.drop_schema(schema_name, cascade=cascade)
+
+
+def rename_ducklake_table(
+    path: str | Path,
+    old_table: str,
+    new_table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None:
+    """
+    Rename a table in a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Currently only SQLite backends are supported for writes.
+    old_table
+        Current name of the table.
+    new_table
+        New name for the table.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the old table does not exist or if the new name already exists.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.rename_table(old_table, new_table, schema_name=schema)

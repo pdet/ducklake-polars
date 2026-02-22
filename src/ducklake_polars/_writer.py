@@ -1363,6 +1363,406 @@ class DuckLakeCatalogWriter:
         con.commit()
 
     # ------------------------------------------------------------------
+    # ALTER TABLE: RENAME COLUMN
+    # ------------------------------------------------------------------
+
+    def rename_column(
+        self,
+        table_name: str,
+        old_column_name: str,
+        new_column_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Rename a column in an existing table.
+
+        DuckLake tracks renames by ending the old column row and inserting
+        a new row with the same ``column_id`` but a different name. Old
+        Parquet files keep the physical old name; the reader uses column
+        history to resolve renames.
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        # Find the source column
+        columns = self._get_columns_for_table(table_id, snap_id)
+        target_col: tuple[int, str, str, int | None] | None = None
+        for col_id, col_name, col_type, parent in columns:
+            if col_name == old_column_name:
+                target_col = (col_id, col_name, col_type, parent)
+            if col_name == new_column_name:
+                msg = f"Column '{new_column_name}' already exists in '{schema_name}.{table_name}'"
+                raise ValueError(msg)
+
+        if target_col is None:
+            msg = f"Column '{old_column_name}' not found in '{schema_name}.{table_name}'"
+            raise ValueError(msg)
+
+        col_id, _old_name, col_type, parent_column = target_col
+
+        # Look up the full column row for column_order and nulls_allowed
+        row = con.execute(
+            "SELECT column_order, nulls_allowed, initial_default, default_value "
+            "FROM ducklake_column "
+            "WHERE table_id = ? AND column_id = ? AND end_snapshot IS NULL",
+            [table_id, col_id],
+        ).fetchone()
+        col_order = row[0]
+        nulls_allowed = row[1]
+        initial_default = row[2]
+        default_value = row[3]
+
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        # End the old column row
+        con.execute(
+            "UPDATE ducklake_column SET end_snapshot = ? "
+            "WHERE table_id = ? AND column_id = ? AND end_snapshot IS NULL",
+            [new_snap, table_id, col_id],
+        )
+
+        # Insert a new row with the same column_id but new name
+        con.execute(
+            "INSERT INTO ducklake_column "
+            "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
+            "column_name, column_type, initial_default, default_value, "
+            "nulls_allowed, parent_column) "
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                col_id, new_snap, table_id, col_order,
+                new_column_name, col_type, initial_default, default_value,
+                nulls_allowed, parent_column,
+            ],
+        )
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change
+        self._record_change(new_snap, f"altered_table:{table_id}")
+
+        con.commit()
+
+    # ------------------------------------------------------------------
+    # DROP TABLE
+    # ------------------------------------------------------------------
+
+    def _end_all_columns(self, table_id: int, snapshot_id: int, new_snap: int) -> None:
+        """Mark all active columns as ended at new_snap."""
+        con = self._connect()
+        con.execute(
+            "UPDATE ducklake_column SET end_snapshot = ? "
+            "WHERE table_id = ? AND begin_snapshot <= ? "
+            "AND (end_snapshot IS NULL OR end_snapshot > ?)",
+            [new_snap, table_id, snapshot_id, snapshot_id],
+        )
+
+    def drop_table(
+        self,
+        table_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Drop a table from the catalog.
+
+        Sets ``end_snapshot`` on the table row, all its columns, and all
+        its active data/delete files. Table stats are left as-is
+        (matching DuckDB behaviour).
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        # End the table row
+        con.execute(
+            "UPDATE ducklake_table SET end_snapshot = ? "
+            "WHERE table_id = ? AND end_snapshot IS NULL",
+            [new_snap, table_id],
+        )
+
+        # End all active columns
+        self._end_all_columns(table_id, snap_id, new_snap)
+
+        # End all active data files
+        self._end_all_data_files(table_id, snap_id, new_snap)
+
+        # End all active delete files
+        self._end_all_delete_files(table_id, snap_id, new_snap)
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change
+        self._record_change(new_snap, f"dropped_table:{table_id}")
+
+        con.commit()
+
+    # ------------------------------------------------------------------
+    # CREATE SCHEMA
+    # ------------------------------------------------------------------
+
+    def _schema_exists(
+        self, schema_name: str, snapshot_id: int
+    ) -> int | None:
+        """Return schema_id if the schema exists at snapshot_id, else None."""
+        con = self._connect()
+        row = con.execute(
+            "SELECT schema_id FROM ducklake_schema "
+            "WHERE schema_name = ? AND begin_snapshot <= ? "
+            "AND (end_snapshot IS NULL OR end_snapshot > ?)",
+            [schema_name, snapshot_id, snapshot_id],
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def create_schema(
+        self,
+        schema_name: str,
+    ) -> int:
+        """Create a new schema in the catalog. Returns the new schema_id."""
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        if self._schema_exists(schema_name, snap_id) is not None:
+            msg = f"Schema '{schema_name}' already exists"
+            raise ValueError(msg)
+
+        schema_id = next_cat_id
+        new_next_cat_id = next_cat_id + 1
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, new_next_cat_id, next_file_id)
+
+        # Insert schema
+        schema_uuid = str(uuid.uuid4())
+        schema_path = f"{schema_name}/"
+        con.execute(
+            "INSERT INTO ducklake_schema "
+            "(schema_id, schema_uuid, begin_snapshot, end_snapshot, "
+            "schema_name, path, path_is_relative) "
+            "VALUES (?, ?, ?, NULL, ?, ?, 1)",
+            [schema_id, schema_uuid, new_snap, schema_name, schema_path],
+        )
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change
+        safe_schema = schema_name.replace('"', '""')
+        self._record_change(new_snap, f'created_schema:"{safe_schema}"')
+
+        con.commit()
+        return schema_id
+
+    # ------------------------------------------------------------------
+    # DROP SCHEMA
+    # ------------------------------------------------------------------
+
+    def _get_tables_in_schema(
+        self, schema_id: int, snapshot_id: int
+    ) -> list[tuple[int, str]]:
+        """Return [(table_id, table_name)] for active tables in a schema."""
+        con = self._connect()
+        rows = con.execute(
+            "SELECT table_id, table_name FROM ducklake_table "
+            "WHERE schema_id = ? AND begin_snapshot <= ? "
+            "AND (end_snapshot IS NULL OR end_snapshot > ?)",
+            [schema_id, snapshot_id, snapshot_id],
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def drop_schema(
+        self,
+        schema_name: str,
+        *,
+        cascade: bool = False,
+    ) -> None:
+        """Drop a schema from the catalog.
+
+        Parameters
+        ----------
+        schema_name
+            Name of the schema to drop.
+        cascade
+            If True, drop all tables in the schema first.
+            If False (default), raise if the schema contains tables.
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        schema_id = self._schema_exists(schema_name, snap_id)
+        if schema_id is None:
+            msg = f"Schema '{schema_name}' not found"
+            raise ValueError(msg)
+
+        tables = self._get_tables_in_schema(schema_id, snap_id)
+
+        if tables and not cascade:
+            table_names = ", ".join(f'"{t[1]}"' for t in tables)
+            msg = (
+                f"Cannot drop schema \"{schema_name}\" because there are "
+                f"entries that depend on it: {table_names}. "
+                f"Use cascade=True to drop all dependents."
+            )
+            raise ValueError(msg)
+
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        # Build change description
+        changes: list[str] = []
+
+        # If cascade, drop all tables first
+        for table_id, _table_name in tables:
+            # End the table row
+            con.execute(
+                "UPDATE ducklake_table SET end_snapshot = ? "
+                "WHERE table_id = ? AND end_snapshot IS NULL",
+                [new_snap, table_id],
+            )
+            self._end_all_columns(table_id, snap_id, new_snap)
+            self._end_all_data_files(table_id, snap_id, new_snap)
+            self._end_all_delete_files(table_id, snap_id, new_snap)
+            changes.append(f"dropped_table:{table_id}")
+
+        # End the schema row
+        con.execute(
+            "UPDATE ducklake_schema SET end_snapshot = ? "
+            "WHERE schema_id = ? AND end_snapshot IS NULL",
+            [new_snap, schema_id],
+        )
+        changes.append(f"dropped_schema:{schema_id}")
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change (DuckDB puts dropped_schema first when cascade)
+        # Re-order: schema first, then tables — matching DuckDB output
+        # Actually DuckDB does: dropped_schema:1,dropped_table:2 (schema first)
+        # Let's match that order
+        schema_changes = [c for c in changes if c.startswith("dropped_schema")]
+        table_changes = [c for c in changes if c.startswith("dropped_table")]
+        ordered = schema_changes + table_changes
+        self._record_change(new_snap, ",".join(ordered))
+
+        con.commit()
+
+    # ------------------------------------------------------------------
+    # RENAME TABLE
+    # ------------------------------------------------------------------
+
+    def rename_table(
+        self,
+        old_table_name: str,
+        new_table_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Rename a table in the catalog.
+
+        DuckLake tracks renames by ending the old table row and inserting
+        a new row with the same ``table_id`` and ``table_uuid`` but a
+        different name. The path stays the same (old directory).
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(old_table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{old_table_name}' not found"
+            raise ValueError(msg)
+
+        if self._table_exists(new_table_name, schema_name, snap_id) is not None:
+            msg = f"Table '{schema_name}.{new_table_name}' already exists"
+            raise ValueError(msg)
+
+        # Get full table row details
+        row = con.execute(
+            "SELECT table_uuid, schema_id, path, path_is_relative "
+            "FROM ducklake_table "
+            "WHERE table_id = ? AND end_snapshot IS NULL",
+            [table_id],
+        ).fetchone()
+        table_uuid = row[0]
+        schema_id = row[1]
+        table_path = row[2]
+        path_is_relative = row[3]
+
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        # End the old table row
+        con.execute(
+            "UPDATE ducklake_table SET end_snapshot = ? "
+            "WHERE table_id = ? AND end_snapshot IS NULL",
+            [new_snap, table_id],
+        )
+
+        # Insert new table row with same table_id/uuid but new name
+        # Path stays the same (pointing to old directory)
+        con.execute(
+            "INSERT INTO ducklake_table "
+            "(table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, "
+            "table_name, path, path_is_relative) "
+            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+            [table_id, table_uuid, new_snap, schema_id,
+             new_table_name, table_path, path_is_relative],
+        )
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change (DuckDB uses created_table for renames)
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = new_table_name.replace('"', '""')
+        self._record_change(
+            new_snap, f'created_table:"{safe_schema}"."{safe_table}"'
+        )
+
+        con.commit()
+
+    # ------------------------------------------------------------------
     # ALTER TABLE: DROP COLUMN
     # ------------------------------------------------------------------
 
