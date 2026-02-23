@@ -32,6 +32,8 @@ __all__ = [
     "rename_ducklake_table",
     "expire_snapshots",
     "vacuum_ducklake",
+    "create_ducklake_view",
+    "drop_ducklake_view",
     "DuckLakeCatalog",
 ]
 
@@ -888,6 +890,96 @@ def alter_ducklake_set_partitioned_by(
         author=author, commit_message=commit_message,
     ) as writer:
         writer.set_partitioned_by(table, columns, schema_name=schema)
+
+
+def create_ducklake_view(
+    path: str | Path,
+    view_name: str,
+    sql: str,
+    *,
+    schema: str = "main",
+    or_replace: bool = False,
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Create a view in a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db),
+        or a PostgreSQL connection string.
+    view_name
+        Name of the view to create.
+    sql
+        The SQL definition of the view.
+    schema
+        Schema name (default: "main").
+    or_replace
+        If True, replace an existing view with the same name.
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the view already exists and or_replace is False.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.create_view(
+            view_name, sql, schema_name=schema, or_replace=or_replace,
+        )
+
+
+def drop_ducklake_view(
+    path: str | Path,
+    view_name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Drop a view from a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db),
+        or a PostgreSQL connection string.
+    view_name
+        Name of the view to drop.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the view does not exist.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.drop_view(view_name, schema_name=schema)
 
 
 def expire_snapshots(

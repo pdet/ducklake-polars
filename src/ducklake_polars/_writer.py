@@ -3459,6 +3459,161 @@ class DuckLakeCatalogWriter:
 
         return deleted_count
 
+    # ------------------------------------------------------------------
+    # CREATE VIEW
+    # ------------------------------------------------------------------
+
+    def _view_exists(
+        self, view_name: str, schema_name: str, snapshot_id: int
+    ) -> int | None:
+        """Return view_id if the view exists at snapshot_id, else None."""
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT v.view_id FROM ducklake_view v "
+                "JOIN ducklake_schema s ON v.schema_id = s.schema_id "
+                "WHERE v.view_name = ? AND s.schema_name = ? "
+                "AND ? >= v.begin_snapshot AND (? < v.end_snapshot OR v.end_snapshot IS NULL) "
+                "AND ? >= s.begin_snapshot AND (? < s.end_snapshot OR s.end_snapshot IS NULL)",
+                [view_name, schema_name, snapshot_id, snapshot_id, snapshot_id, snapshot_id],
+            ).fetchone()
+        except Exception as exc:
+            if self._backend.is_table_not_found(exc):
+                return None
+            raise
+        return row[0] if row is not None else None
+
+    def create_view(
+        self,
+        view_name: str,
+        sql: str,
+        *,
+        schema_name: str = "main",
+        or_replace: bool = False,
+        column_aliases: str = "",
+    ) -> int:
+        """Create a view in the catalog. Returns the new view_id.
+
+        Parameters
+        ----------
+        view_name
+            Name of the view to create.
+        sql
+            The SQL definition of the view.
+        schema_name
+            Schema name (default: "main").
+        or_replace
+            If True, replace an existing view with the same name.
+        column_aliases
+            Comma-separated column aliases (empty string if none).
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        existing_view_id = self._view_exists(view_name, schema_name, snap_id)
+
+        if existing_view_id is not None and not or_replace:
+            msg = f"View '{schema_name}.{view_name}' already exists"
+            raise ValueError(msg)
+
+        # Resolve schema
+        schema_id, _schema_path, _schema_path_rel = self._resolve_schema_info(
+            schema_name, snap_id
+        )
+
+        # Allocate view_id
+        view_id = next_cat_id
+        new_next_cat_id = next_cat_id + 1
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, new_next_cat_id, next_file_id)
+
+        changes: list[str] = []
+
+        # If replacing, end the old view row
+        if existing_view_id is not None:
+            con.execute(
+                "UPDATE ducklake_view SET end_snapshot = ? "
+                "WHERE view_id = ? AND end_snapshot IS NULL",
+                [new_snap, existing_view_id],
+            )
+            changes.append(f"dropped_view:{existing_view_id}")
+
+        # Insert the new view row
+        view_uuid = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO ducklake_view "
+            "(view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, "
+            "view_name, dialect, sql, column_aliases) "
+            "VALUES (?, ?, ?, NULL, ?, ?, 'duckdb', ?, ?)",
+            [view_id, view_uuid, new_snap, schema_id,
+             view_name, sql, column_aliases],
+        )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_view = view_name.replace('"', '""')
+        changes.append(f'created_view:"{safe_schema}"."{safe_view}"')
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change
+        self._record_change(new_snap, ",".join(changes))
+
+        con.commit()
+        return view_id
+
+    # ------------------------------------------------------------------
+    # DROP VIEW
+    # ------------------------------------------------------------------
+
+    def drop_view(
+        self,
+        view_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Drop a view from the catalog.
+
+        Sets ``end_snapshot`` on the view row.
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        view_id = self._view_exists(view_name, schema_name, snap_id)
+        if view_id is None:
+            msg = f"View '{schema_name}.{view_name}' not found"
+            raise ValueError(msg)
+
+        new_schema_ver = schema_ver + 1
+
+        # Create snapshot
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        # End the view row
+        con.execute(
+            "UPDATE ducklake_view SET end_snapshot = ? "
+            "WHERE view_id = ? AND end_snapshot IS NULL",
+            [new_snap, view_id],
+        )
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Record change
+        self._record_change(new_snap, f"dropped_view:{view_id}")
+
+        con.commit()
+
     @staticmethod
     def _resolve_vacuum_path(
         file_path: str,
