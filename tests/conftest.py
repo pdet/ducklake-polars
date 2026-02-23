@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import duckdb
+import polars as pl
 import pytest
 
 
@@ -200,3 +201,249 @@ def ducklake_catalog_inline(request, tmp_path):
     catalog.close()
     if backend == "postgres":
         catalog._cleanup_postgres_tables()
+
+
+# -----------------------------------------------------------------------
+# Write-test helpers
+# -----------------------------------------------------------------------
+
+
+@dataclass
+class WriteCatalogHelper:
+    """
+    Lightweight helper for write-path tests.
+
+    Provides ``metadata_path``, ``data_path``, ``backend`` and methods for
+    querying the metadata database and reading back with DuckDB. Created via
+    :func:`make_write_catalog` factory fixture.
+    """
+
+    metadata_path: str
+    data_path: str
+    backend: str  # "sqlite" or "postgres"
+    inline_limit: int = 0
+
+    # -- metadata queries ------------------------------------------------
+
+    def query_one(self, sql: str, params: list[Any] | None = None) -> Any:
+        """Execute SQL and return one row (fetchone)."""
+        if self.backend == "sqlite":
+            import sqlite3
+
+            con = sqlite3.connect(self.metadata_path)
+            try:
+                return con.execute(sql, params or []).fetchone()
+            finally:
+                con.close()
+        else:
+            import psycopg2
+
+            con = psycopg2.connect(self.metadata_path)
+            try:
+                con.autocommit = True
+                cur = con.cursor()
+                try:
+                    cur.execute(sql.replace("?", "%s"), params or [])
+                    return cur.fetchone()
+                finally:
+                    cur.close()
+            finally:
+                con.close()
+
+    def query_all(self, sql: str, params: list[Any] | None = None) -> list[Any]:
+        """Execute SQL and return all rows (fetchall)."""
+        if self.backend == "sqlite":
+            import sqlite3
+
+            con = sqlite3.connect(self.metadata_path)
+            try:
+                return con.execute(sql, params or []).fetchall()
+            finally:
+                con.close()
+        else:
+            import psycopg2
+
+            con = psycopg2.connect(self.metadata_path)
+            try:
+                con.autocommit = True
+                cur = con.cursor()
+                try:
+                    cur.execute(sql.replace("?", "%s"), params or [])
+                    return cur.fetchall()
+                finally:
+                    cur.close()
+            finally:
+                con.close()
+
+    # -- DuckDB interop --------------------------------------------------
+
+    def read_with_duckdb(
+        self, table_name: str, *, inline_limit: int | None = None
+    ) -> pl.DataFrame:
+        """Read a table back using DuckDB's DuckLake extension."""
+        limit = inline_limit if inline_limit is not None else self.inline_limit
+        if self.backend == "sqlite":
+            source = f"ducklake:sqlite:{self.metadata_path}"
+        else:
+            source = f"ducklake:postgres:{self.metadata_path}"
+
+        con = duckdb.connect()
+        con.install_extension("ducklake")
+        con.load_extension("ducklake")
+        con.execute(
+            f"ATTACH '{source}' AS ducklake "
+            f"(DATA_PATH '{self.data_path}', DATA_INLINING_ROW_LIMIT {limit})"
+        )
+        cursor = con.execute(f'SELECT * FROM ducklake."{table_name}"')
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        con.close()
+        if not rows:
+            return pl.DataFrame({c: [] for c in columns})
+        data = {c: [r[i] for r in rows] for i, c in enumerate(columns)}
+        return pl.DataFrame(data)
+
+    def read_with_duckdb_schema(
+        self, table_name: str, schema_name: str, *, inline_limit: int | None = None
+    ) -> pl.DataFrame:
+        """Read a table in a non-default schema using DuckDB."""
+        limit = inline_limit if inline_limit is not None else self.inline_limit
+        if self.backend == "sqlite":
+            source = f"ducklake:sqlite:{self.metadata_path}"
+        else:
+            source = f"ducklake:postgres:{self.metadata_path}"
+
+        con = duckdb.connect()
+        con.install_extension("ducklake")
+        con.load_extension("ducklake")
+        con.execute(
+            f"ATTACH '{source}' AS ducklake "
+            f"(DATA_PATH '{self.data_path}', DATA_INLINING_ROW_LIMIT {limit})"
+        )
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        cursor = con.execute(
+            f'SELECT * FROM ducklake."{safe_schema}"."{safe_table}"'
+        )
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        con.close()
+        if not rows:
+            return pl.DataFrame({c: [] for c in columns})
+        data = {c: [r[i] for r in rows] for i, c in enumerate(columns)}
+        return pl.DataFrame(data)
+
+    # -- PostgreSQL cleanup -----------------------------------------------
+
+    def cleanup(self) -> None:
+        """Clean up PostgreSQL tables if applicable."""
+        if self.backend == "postgres":
+            import psycopg2
+
+            con = psycopg2.connect(self.metadata_path)
+            try:
+                con.autocommit = True
+                cur = con.cursor()
+                try:
+                    cur.execute(
+                        "SELECT tablename FROM pg_tables "
+                        "WHERE schemaname = 'public'"
+                    )
+                    tables = [row[0] for row in cur.fetchall()]
+                    for table in tables:
+                        safe = table.replace('"', '""')
+                        cur.execute(f'DROP TABLE IF EXISTS "{safe}" CASCADE')
+                finally:
+                    cur.close()
+            finally:
+                con.close()
+
+    # -- PRAGMA / table_info helper (SQLite PRAGMA → PG info_schema) -----
+
+    def get_table_columns(self, table_name: str) -> list[tuple[str, str]]:
+        """Return [(column_name, column_type)] for a raw SQL table.
+
+        Uses ``PRAGMA table_info`` on SQLite and ``information_schema``
+        on PostgreSQL.
+        """
+        if self.backend == "sqlite":
+            rows = self.query_all(f'PRAGMA table_info("{table_name}")')
+            return [(r[1], r[2]) for r in rows]
+        else:
+            rows = self.query_all(
+                "SELECT column_name, data_type "
+                "FROM information_schema.columns "
+                "WHERE table_name = ? ORDER BY ordinal_position",
+                [table_name],
+            )
+            return [(r[0], r[1]) for r in rows]
+
+
+def _create_write_catalog(
+    tmp_path: Any,
+    backend: str,
+    inline: bool = False,
+    inline_limit: int = 20,
+) -> WriteCatalogHelper:
+    """Create a DuckLake catalog via DuckDB and return a WriteCatalogHelper."""
+    if backend == "sqlite":
+        metadata_path = str(tmp_path / "write_test.ducklake")
+    else:
+        metadata_path = os.environ["DUCKLAKE_PG_DSN"]
+
+    data_path = str(tmp_path / "data")
+    os.makedirs(data_path, exist_ok=True)
+
+    helper = WriteCatalogHelper(
+        metadata_path=metadata_path,
+        data_path=data_path,
+        backend=backend,
+        inline_limit=inline_limit if inline else 0,
+    )
+
+    # Clean up first for PostgreSQL
+    helper.cleanup()
+
+    con = duckdb.connect()
+    con.install_extension("ducklake")
+    con.load_extension("ducklake")
+
+    if backend == "sqlite":
+        attach_source = f"ducklake:sqlite:{metadata_path}"
+    else:
+        attach_source = f"ducklake:postgres:{metadata_path}"
+
+    inline_opt = (
+        f", DATA_INLINING_ROW_LIMIT {inline_limit}"
+        if inline
+        else ", DATA_INLINING_ROW_LIMIT 0"
+    )
+    con.execute(
+        f"ATTACH '{attach_source}' AS ducklake "
+        f"(DATA_PATH '{data_path}'{inline_opt})"
+    )
+    con.close()
+
+    return helper
+
+
+@pytest.fixture(params=_get_backends())
+def make_write_catalog(request, tmp_path):
+    """
+    Factory fixture for write-path tests.
+
+    Yields a callable ``make(inline=False, inline_limit=20)`` that returns
+    a :class:`WriteCatalogHelper`. Parametrized over backends.
+    """
+    backend = request.param
+    created: list[WriteCatalogHelper] = []
+
+    def factory(inline: bool = False, inline_limit: int = 20) -> WriteCatalogHelper:
+        helper = _create_write_catalog(tmp_path, backend, inline, inline_limit)
+        created.append(helper)
+        return helper
+
+    yield factory
+
+    for h in created:
+        h.cleanup()

@@ -12,7 +12,7 @@ from typing import Any
 
 import polars as pl
 
-from ducklake_polars._backend import SQLiteBackend, create_backend
+from ducklake_polars._backend import PostgreSQLBackend, SQLiteBackend, create_backend
 from ducklake_polars._schema import polars_type_to_duckdb
 
 
@@ -42,6 +42,35 @@ def _read_parquet_footer_size(path: str) -> int:
         return footer_len
     except (OSError, struct.error):
         return 0
+
+
+class _PlaceholderConnection:
+    """
+    Wraps a database connection to translate ``?`` placeholders to ``%s``.
+
+    This allows the writer to use ``?`` consistently everywhere while
+    supporting both SQLite (``?``) and PostgreSQL (``%s``) backends.
+    """
+
+    __slots__ = ("_con", "_placeholder")
+
+    def __init__(self, con: Any, placeholder: str) -> None:
+        self._con = con
+        self._placeholder = placeholder
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        if self._placeholder != "?":
+            sql = sql.replace("?", self._placeholder)
+        if params is not None:
+            return self._con.execute(sql, params)
+        return self._con.execute(sql)
+
+    def commit(self) -> None:
+        if hasattr(self._con, "commit"):
+            self._con.commit()
+
+    def close(self) -> None:
+        self._con.close()
 
 
 def _stat_value_to_str(value: Any, dtype: pl.DataType) -> str | None:
@@ -76,11 +105,16 @@ class _ColumnDef:
 
 class DuckLakeCatalogWriter:
     """
-    Writes metadata to a DuckLake catalog (SQLite only).
+    Writes metadata to a DuckLake catalog (SQLite or PostgreSQL).
 
     Handles snapshot creation, table/column registration, Parquet file
     writing, and statistics computation. Produces catalogs fully
     interoperable with DuckDB's DuckLake extension.
+
+    The backend is auto-detected from the metadata path: PostgreSQL
+    connection strings (``postgresql://...``) use psycopg2; everything
+    else is treated as a SQLite file path. SQL placeholder differences
+    (``?`` vs ``%s``) are handled transparently.
     """
 
     def __init__(
@@ -91,9 +125,6 @@ class DuckLakeCatalogWriter:
         data_inlining_row_limit: int = 0,
     ) -> None:
         self._backend = create_backend(metadata_path)
-        if not isinstance(self._backend, SQLiteBackend):
-            msg = "Write support is currently limited to SQLite backends"
-            raise ValueError(msg)
         self._metadata_path = metadata_path
         self._data_path_override = data_path_override
         self._data_inlining_row_limit = data_inlining_row_limit
@@ -101,7 +132,8 @@ class DuckLakeCatalogWriter:
 
     def _connect(self) -> Any:
         if self._con is None:
-            self._con = self._backend.connect_writable()
+            raw = self._backend.connect_writable()
+            self._con = _PlaceholderConnection(raw, self._backend.placeholder)
         return self._con
 
     def close(self) -> None:
@@ -170,8 +202,8 @@ class DuckLakeCatalogWriter:
     # Data inlining helpers
     # ------------------------------------------------------------------
 
-    def _duckdb_type_to_sqlite_type(self, duckdb_type: str) -> str:
-        """Map a DuckDB column type to an appropriate SQLite storage type."""
+    def _duckdb_type_to_sql_type(self, duckdb_type: str) -> str:
+        """Map a DuckDB column type to an appropriate storage type for the backend."""
         t = duckdb_type.lower()
         if t in (
             "int8", "int16", "int32", "int64", "uint8", "uint16",
@@ -180,6 +212,8 @@ class DuckLakeCatalogWriter:
         ):
             return "BIGINT"
         if t in ("float32", "float64", "float", "double"):
+            if isinstance(self._backend, PostgreSQLBackend):
+                return "DOUBLE PRECISION"
             return "DOUBLE"
         return "VARCHAR"
 
@@ -247,7 +281,7 @@ class DuckLakeCatalogWriter:
         ]
         for _col_id, col_name, col_type, _parent in columns:
             safe_col = col_name.replace('"', '""')
-            sqlite_type = self._duckdb_type_to_sqlite_type(col_type)
+            sqlite_type = self._duckdb_type_to_sql_type(col_type)
             col_defs.append(f'"{safe_col}" {sqlite_type}')
 
         create_sql = f'CREATE TABLE IF NOT EXISTS "{safe}" ({", ".join(col_defs)})'
@@ -262,12 +296,14 @@ class DuckLakeCatalogWriter:
         )
         return tbl_name
 
-    def _serialize_value_for_sqlite(self, value: Any, col_type: str) -> Any:
-        """Convert a Python value to the appropriate SQLite storage format."""
+    def _serialize_value(self, value: Any, col_type: str) -> Any:
+        """Convert a Python value to an appropriate storage format for the backend."""
         if value is None:
             return None
         t = col_type.lower()
         if t == "boolean":
+            # Inlined data tables use BIGINT for boolean columns in both
+            # SQLite and PostgreSQL, so always store as 0/1 integer.
             return 1 if value else 0
         if t in ("date",):
             return str(value)
@@ -305,7 +341,7 @@ class DuckLakeCatalogWriter:
             row_vals: list[Any] = [row_id_start + i, new_snap, None]
             for j, col_name in enumerate(col_names):
                 row_vals.append(
-                    self._serialize_value_for_sqlite(row_tuple[j], col_types[col_name])
+                    self._serialize_value(row_tuple[j], col_types[col_name])
                 )
             con.execute(insert_sql, row_vals)
 
@@ -451,8 +487,8 @@ class DuckLakeCatalogWriter:
                 "INSERT INTO ducklake_name_mapping "
                 "(mapping_id, column_id, source_name, target_field_id, "
                 "parent_column, is_partition) "
-                "VALUES (?, ?, ?, ?, ?, 0)",
-                [mapping_id, col_id, col_name, col_id, parent_col],
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [mapping_id, col_id, col_name, col_id, parent_col, False],
             )
         return mapping_id
 
@@ -620,8 +656,8 @@ class DuckLakeCatalogWriter:
             "INSERT INTO ducklake_table "
             "(table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, "
             "table_name, path, path_is_relative) "
-            "VALUES (?, ?, ?, NULL, ?, ?, ?, 1)",
-            [table_id, table_uuid, new_snap, schema_id, table_name, table_path],
+            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+            [table_id, table_uuid, new_snap, schema_id, table_name, table_path, True],
         )
 
         # Flatten schema and insert columns
@@ -641,7 +677,7 @@ class DuckLakeCatalogWriter:
                     cd.column_order,
                     cd.column_name,
                     cd.column_type,
-                    1 if cd.nulls_allowed else 0,
+                    cd.nulls_allowed,
                     cd.parent_column,
                 ],
             )
@@ -662,6 +698,157 @@ class DuckLakeCatalogWriter:
 
         con.commit()
         return table_id
+
+    def create_table_with_data(
+        self,
+        table_name: str,
+        df: pl.DataFrame,
+        *,
+        schema_name: str = "main",
+    ) -> int:
+        """
+        Create a new table and insert data in a single snapshot.
+
+        Returns the new snapshot ID.
+        """
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        # Check table doesn't exist
+        if self._table_exists(table_name, schema_name, snap_id) is not None:
+            msg = f"Table '{schema_name}.{table_name}' already exists"
+            raise ValueError(msg)
+
+        # Resolve schema
+        schema_id, schema_path, schema_path_rel = self._resolve_schema_info(
+            schema_name, snap_id
+        )
+
+        # Allocate IDs
+        table_id = next_cat_id
+        new_next_cat_id = next_cat_id + 1
+        new_schema_ver = schema_ver + 1
+
+        # Flatten schema
+        schema_dict = dict(df.schema)
+        col_defs = self._flatten_schema(schema_dict)
+        top_level_cols = [
+            (cd.column_id, cd.column_name, cd.column_type, cd.parent_column)
+            for cd in col_defs
+            if cd.parent_column is None
+        ]
+
+        table_path = f"{table_name}/"
+
+        # Determine data handling
+        has_data = not df.is_empty()
+        inline_data = (
+            has_data
+            and self._data_inlining_row_limit > 0
+            and len(df) <= self._data_inlining_row_limit
+        )
+
+        if has_data and not inline_data:
+            data_file_id = next_file_id
+            new_next_file_id = next_file_id + 1
+        else:
+            new_next_file_id = next_file_id
+
+        # Create single snapshot
+        new_snap = self._create_snapshot(
+            new_schema_ver, new_next_cat_id, new_next_file_id
+        )
+
+        # Insert table
+        table_uuid = str(uuid.uuid4())
+        con.execute(
+            "INSERT INTO ducklake_table "
+            "(table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, "
+            "table_name, path, path_is_relative) "
+            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+            [table_id, table_uuid, new_snap, schema_id, table_name, table_path, True],
+        )
+
+        # Insert columns
+        for cd in col_defs:
+            con.execute(
+                "INSERT INTO ducklake_column "
+                "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
+                "column_name, column_type, initial_default, default_value, "
+                "nulls_allowed, parent_column) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                [
+                    cd.column_id,
+                    new_snap,
+                    table_id,
+                    cd.column_order,
+                    cd.column_name,
+                    cd.column_type,
+                    cd.nulls_allowed,
+                    cd.parent_column,
+                ],
+            )
+
+        # Record schema version
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        # Write data
+        if has_data:
+            if inline_data:
+                self._insert_inlined_rows(
+                    df, table_id, new_schema_ver, top_level_cols, new_snap, 0,
+                )
+                self._update_table_stats(table_id, len(df), 0)
+                col_stats = self._compute_file_column_stats(df, top_level_cols)
+                self._update_table_column_stats(
+                    table_id, top_level_cols, col_stats,
+                )
+            else:
+                # Build output directory
+                base = self.data_path
+                if schema_path_rel:
+                    base = os.path.join(base, schema_path)
+                else:
+                    base = schema_path
+                base = os.path.join(base, table_path)
+                os.makedirs(base, exist_ok=True)
+
+                file_name = f"ducklake-{_uuid7()}.parquet"
+                file_path = os.path.join(base, file_name)
+                df.write_parquet(file_path)
+
+                file_size = os.path.getsize(file_path)
+                footer_size = _read_parquet_footer_size(file_path)
+
+                mapping_id = self._register_name_mapping(table_id, top_level_cols)
+
+                self._register_data_file(
+                    data_file_id, table_id, new_snap, file_name,
+                    len(df), file_size, footer_size, 0,
+                    None, mapping_id,
+                )
+
+                col_stats = self._compute_file_column_stats(df, top_level_cols)
+                self._register_file_column_stats(
+                    data_file_id, table_id, col_stats,
+                )
+                self._update_table_stats(table_id, len(df), file_size)
+                self._update_table_column_stats(
+                    table_id, top_level_cols, col_stats,
+                )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        self._record_change(
+            new_snap, f'created_table:"{safe_schema}"."{safe_table}"'
+        )
+
+        con.commit()
+        return new_snap
 
     # ------------------------------------------------------------------
     # INSERT DATA
@@ -763,7 +950,7 @@ class DuckLakeCatalogWriter:
             # NaN detection for float types
             nan_int = None
             if col_type in ("float32", "float64"):
-                nan_int = 1 if _contains_nan(series) else 0
+                nan_int = _contains_nan(series)
 
             results.append(
                 (col_id, col_name, value_count, null_count, min_val, max_val, nan_int)
@@ -836,12 +1023,13 @@ class DuckLakeCatalogWriter:
             "path, path_is_relative, file_format, record_count, file_size_bytes, "
             "footer_size, row_id_start, partition_id, encryption_key, "
             "partial_file_info, mapping_id) "
-            "VALUES (?, ?, ?, NULL, NULL, ?, 1, 'parquet', ?, ?, ?, ?, ?, NULL, NULL, ?)",
+            "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, NULL, ?)",
             [
                 data_file_id,
                 table_id,
                 new_snap,
                 rel_path,
+                True,
                 record_count,
                 file_size,
                 footer_size,
@@ -948,14 +1136,14 @@ class DuckLakeCatalogWriter:
                 [table_id, col_id],
             ).fetchone()
 
-            contains_null = 1 if null_count and null_count > 0 else 0
+            contains_null = bool(null_count and null_count > 0)
             contains_nan = nan_int if nan_int is not None else None
 
             if existing_col_stat is not None:
-                merged_null = 1 if (existing_col_stat[0] or contains_null) else 0
+                merged_null = bool(existing_col_stat[0] or contains_null)
                 merged_nan = None
                 if existing_col_stat[1] is not None or contains_nan is not None:
-                    merged_nan = 1 if (existing_col_stat[1] or (contains_nan or 0)) else 0
+                    merged_nan = bool(existing_col_stat[1] or contains_nan)
                 merged_min = self._merge_stat_value(
                     existing_col_stat[2], min_val, col_type, pick_min=True
                 )
@@ -1329,7 +1517,7 @@ class DuckLakeCatalogWriter:
             )
             col_stats = self._compute_file_column_stats(df, columns)
             for col_id, _col_name, _vc, null_count, min_val, max_val, nan_int in col_stats:
-                contains_null = 1 if null_count and null_count > 0 else 0
+                contains_null = bool(null_count and null_count > 0)
                 con.execute(
                     "INSERT INTO ducklake_table_column_stats "
                     "(table_id, column_id, contains_null, contains_nan, "
@@ -1383,7 +1571,7 @@ class DuckLakeCatalogWriter:
                 [table_id],
             )
             for col_id, _col_name, _vc, null_count, min_val, max_val, nan_int in col_stats:
-                contains_null = 1 if null_count and null_count > 0 else 0
+                contains_null = bool(null_count and null_count > 0)
                 con.execute(
                     "INSERT INTO ducklake_table_column_stats "
                     "(table_id, column_id, contains_null, contains_nan, "
@@ -1510,7 +1698,7 @@ class DuckLakeCatalogWriter:
         )
         full_col_stats = self._compute_file_column_stats(df, columns)
         for col_id, _col_name, _vc, null_count, min_val, max_val, nan_int in full_col_stats:
-            contains_null = 1 if null_count and null_count > 0 else 0
+            contains_null = bool(null_count and null_count > 0)
             con.execute(
                 "INSERT INTO ducklake_table_column_stats "
                 "(table_id, column_id, contains_null, contains_nan, "
@@ -1675,10 +1863,10 @@ class DuckLakeCatalogWriter:
                     "(delete_file_id, table_id, begin_snapshot, end_snapshot, "
                     "data_file_id, path, path_is_relative, format, delete_count, "
                     "file_size_bytes, footer_size, encryption_key) "
-                    "VALUES (?, ?, ?, NULL, ?, ?, 1, 'parquet', ?, ?, ?, NULL)",
+                    "VALUES (?, ?, ?, NULL, ?, ?, ?, 'parquet', ?, ?, ?, NULL)",
                     [
                         delete_file_id, table_id, new_snap, data_file_id,
-                        delete_file_name, len(positions),
+                        delete_file_name, True, len(positions),
                         delete_file_size, delete_footer_size,
                     ],
                 )
@@ -1893,10 +2081,10 @@ class DuckLakeCatalogWriter:
                 "(delete_file_id, table_id, begin_snapshot, end_snapshot, "
                 "data_file_id, path, path_is_relative, format, delete_count, "
                 "file_size_bytes, footer_size, encryption_key) "
-                "VALUES (?, ?, ?, NULL, ?, ?, 1, 'parquet', ?, ?, ?, NULL)",
+                "VALUES (?, ?, ?, NULL, ?, ?, ?, 'parquet', ?, ?, ?, NULL)",
                 [
                     delete_file_id, table_id, new_snap, data_file_id,
-                    delete_file_name, len(positions),
+                    delete_file_name, True, len(positions),
                     delete_file_size, delete_footer_size,
                 ],
             )
@@ -1988,7 +2176,403 @@ class DuckLakeCatalogWriter:
         return total_updated
 
     # ------------------------------------------------------------------
+    # MERGE (match on keys, delete matched + insert)
+    # ------------------------------------------------------------------
+
+    def _read_all_inlined_active_rows(
+        self,
+        table_id: int,
+        snapshot_id: int,
+        columns: list[tuple[int, str, str, int | None]],
+    ) -> pl.DataFrame | None:
+        """Read all active inlined rows as a DataFrame (no predicate filter)."""
+        con = self._connect()
+        try:
+            inlined_tables = con.execute(
+                "SELECT table_name FROM ducklake_inlined_data_tables "
+                "WHERE table_id = ?",
+                [table_id],
+            ).fetchall()
+        except Exception:
+            return None
+
+        col_names = [c[1] for c in columns]
+        all_dfs: list[pl.DataFrame] = []
+
+        for (tbl_name,) in inlined_tables:
+            safe = tbl_name.replace('"', '""')
+            cols_sql = ", ".join(
+                f'"{c.replace(chr(34), chr(34) + chr(34))}"' for c in col_names
+            )
+            try:
+                rows = con.execute(
+                    f'SELECT {cols_sql} FROM "{safe}" '
+                    f"WHERE ? >= begin_snapshot "
+                    f"AND (? < end_snapshot OR end_snapshot IS NULL)",
+                    [snapshot_id, snapshot_id],
+                ).fetchall()
+            except Exception:
+                continue
+
+            if rows:
+                data = {
+                    name: [r[i] for r in rows]
+                    for i, name in enumerate(col_names)
+                }
+                all_dfs.append(pl.DataFrame(data))
+
+        if not all_dfs:
+            return None
+        return pl.concat(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
+
+    @staticmethod
+    def _build_key_match_predicate(
+        on: list[str],
+        matched_keys_df: pl.DataFrame,
+    ) -> pl.Expr:
+        """Build a Polars expression matching rows whose key columns are in *matched_keys_df*."""
+        if len(on) == 1:
+            return pl.col(on[0]).is_in(matched_keys_df[on[0]])
+
+        # Multiple key columns: OR of per-row AND conditions
+        conditions: list[pl.Expr] = []
+        for row in matched_keys_df.iter_rows(named=True):
+            row_cond: pl.Expr | None = None
+            for col in on:
+                eq = pl.col(col) == row[col]
+                row_cond = eq if row_cond is None else row_cond & eq
+            assert row_cond is not None
+            conditions.append(row_cond)
+
+        result = conditions[0]
+        for c in conditions[1:]:
+            result = result | c
+        return result
+
+    def merge_data(
+        self,
+        source_df: pl.DataFrame,
+        table_name: str,
+        on: str | list[str],
+        *,
+        when_matched_update: dict[str, Any] | bool | None = None,
+        when_not_matched_insert: bool = True,
+        schema_name: str = "main",
+    ) -> tuple[int, int]:
+        """
+        MERGE *source_df* into an existing table.
+
+        Matches rows on the *on* key columns, optionally updates matched
+        target rows, and optionally inserts unmatched source rows.
+        Implemented as delete + insert in a single snapshot.
+
+        Parameters
+        ----------
+        when_matched_update
+            - ``None``: matched target rows are left untouched.
+            - ``True``: replace matched target rows with source rows.
+            - ``dict``: update matched target rows with these values
+              (literal or ``pl.Expr``).
+        when_not_matched_insert
+            If True (default), source rows that have no match in the
+            target are inserted.
+
+        Returns ``(rows_updated, rows_inserted)``.
+        """
+        if isinstance(on, str):
+            on = [on]
+
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id, table_path, table_path_rel, schema_path, schema_path_rel = (
+            self._get_table_info(table_name, schema_name, snap_id)
+        )
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        col_names = [c[1] for c in columns]
+        data_files = self._get_active_data_files(table_id, snap_id)
+        inlined_count = self._get_inlined_active_row_count(table_id, snap_id)
+
+        # Unique source keys for matching
+        source_keys = source_df.select(on).unique()
+
+        # ----------------------------------------------------------
+        # Phase 1: find matched target rows in Parquet files
+        # ----------------------------------------------------------
+        pending_deletes: list[tuple[int, str, list[int]]] = []
+        matched_target_dfs: list[pl.DataFrame] = []
+        all_target_key_dfs: list[pl.DataFrame] = []
+
+        for data_file_id, rel_path, path_is_rel, _rc, _rid in data_files:
+            abs_path = self._resolve_file_path(
+                rel_path, path_is_rel,
+                table_path, table_path_rel,
+                schema_path, schema_path_rel,
+            )
+            file_df = pl.read_parquet(abs_path)
+            all_target_key_dfs.append(file_df.select(on))
+
+            if when_matched_update is not None:
+                file_df_idx = file_df.with_row_index("__merge_idx__")
+                matched = file_df_idx.join(source_keys, on=on, how="semi")
+                if len(matched) > 0:
+                    positions = sorted(matched["__merge_idx__"].to_list())
+                    pending_deletes.append((data_file_id, abs_path, positions))
+                    matched_target_dfs.append(matched.drop("__merge_idx__"))
+
+        # ----------------------------------------------------------
+        # Phase 2: find matched target rows in inlined data
+        # ----------------------------------------------------------
+        inlined_matched_df: pl.DataFrame | None = None
+        if inlined_count > 0:
+            inlined_df = self._read_all_inlined_active_rows(
+                table_id, snap_id, columns,
+            )
+            if inlined_df is not None and len(inlined_df) > 0:
+                all_target_key_dfs.append(inlined_df.select(on))
+                if when_matched_update is not None:
+                    inlined_matched = inlined_df.join(
+                        source_keys, on=on, how="semi",
+                    )
+                    if len(inlined_matched) > 0:
+                        inlined_matched_df = inlined_matched
+                        matched_target_dfs.append(inlined_matched)
+
+        # ----------------------------------------------------------
+        # Phase 3: counts and early exit
+        # ----------------------------------------------------------
+        total_updated = sum(len(p) for _, _, p in pending_deletes)
+        if inlined_matched_df is not None:
+            total_updated += len(inlined_matched_df)
+
+        # Find unmatched source rows
+        unmatched_source: pl.DataFrame
+        if when_not_matched_insert:
+            if all_target_key_dfs:
+                all_target_keys = pl.concat(all_target_key_dfs).unique()
+                unmatched_source = source_df.join(
+                    all_target_keys, on=on, how="anti",
+                )
+            else:
+                unmatched_source = source_df
+        else:
+            unmatched_source = source_df.clear()
+
+        total_inserted = len(unmatched_source)
+
+        if total_updated == 0 and total_inserted == 0:
+            return (0, 0)
+
+        # ----------------------------------------------------------
+        # Phase 4: build rows to insert
+        # ----------------------------------------------------------
+        rows_to_insert_parts: list[pl.DataFrame] = []
+
+        if when_matched_update is not None and matched_target_dfs:
+            all_matched = pl.concat(matched_target_dfs)
+            if when_matched_update is True:
+                # Replace with source rows
+                updated_rows = (
+                    all_matched.select(on)
+                    .join(source_df, on=on, how="inner")
+                    .select(col_names)
+                )
+                rows_to_insert_parts.append(updated_rows)
+            elif isinstance(when_matched_update, dict):
+                update_exprs: list[pl.Expr] = []
+                for col_name, value in when_matched_update.items():
+                    if isinstance(value, pl.Expr):
+                        update_exprs.append(value.alias(col_name))
+                    else:
+                        update_exprs.append(pl.lit(value).alias(col_name))
+                rows_to_insert_parts.append(
+                    all_matched.with_columns(update_exprs)
+                )
+
+        if total_inserted > 0:
+            rows_to_insert_parts.append(unmatched_source.select(col_names))
+
+        if not rows_to_insert_parts:
+            return (0, 0)
+
+        insert_df = (
+            pl.concat(rows_to_insert_parts)
+            if len(rows_to_insert_parts) > 1
+            else rows_to_insert_parts[0]
+        )
+
+        # ----------------------------------------------------------
+        # Phase 5: build output dir
+        # ----------------------------------------------------------
+        base = self.data_path
+        if schema_path_rel:
+            base = os.path.join(base, schema_path)
+        else:
+            base = schema_path
+        if table_path_rel:
+            base = os.path.join(base, table_path)
+        else:
+            base = table_path
+        os.makedirs(base, exist_ok=True)
+
+        # ----------------------------------------------------------
+        # Phase 6: allocate IDs and create snapshot
+        # ----------------------------------------------------------
+        n_delete_files = len(pending_deletes)
+        n_data_files = 1 if len(insert_df) > 0 else 0
+
+        # Check for partitioned table
+        part_id = self._get_active_partition(table_id, snap_id)
+        if part_id is not None and n_data_files > 0:
+            part_cols = self._get_partition_columns(part_id, table_id)
+            col_id_to_name: dict[int, str] = {c[0]: c[1] for c in columns}
+            part_col_names = [col_id_to_name[cid] for _, cid, _ in part_cols]
+            part_key_indices = [ki for ki, _, _ in part_cols]
+            groups = insert_df.group_by(part_col_names, maintain_order=True)
+            group_list: list[tuple[tuple, pl.DataFrame]] = []
+            for gk, gdf in groups:
+                if not isinstance(gk, tuple):
+                    gk = (gk,)
+                group_list.append((gk, gdf))
+            n_data_files = len(group_list)
+        else:
+            part_col_names = []
+            part_key_indices = []
+            group_list = []
+
+        first_data_file_id = next_file_id + n_delete_files
+        new_next_file_id = first_data_file_id + n_data_files
+
+        new_snap = self._create_snapshot(
+            schema_ver, next_cat_id, new_next_file_id,
+        )
+
+        # ----------------------------------------------------------
+        # Phase 7: write delete files for matched Parquet rows
+        # ----------------------------------------------------------
+        current_file_id = next_file_id
+        for data_file_id, abs_data_path, positions in pending_deletes:
+            delete_file_id = current_file_id
+            current_file_id += 1
+
+            delete_df = pl.DataFrame({
+                "file_path": [abs_data_path] * len(positions),
+                "pos": pl.Series(positions, dtype=pl.Int64),
+            })
+            delete_file_name = f"ducklake-{_uuid7()}-delete.parquet"
+            delete_file_path = os.path.join(base, delete_file_name)
+            delete_df.write_parquet(delete_file_path)
+
+            delete_file_size = os.path.getsize(delete_file_path)
+            delete_footer_size = _read_parquet_footer_size(delete_file_path)
+
+            con.execute(
+                "INSERT INTO ducklake_delete_file "
+                "(delete_file_id, table_id, begin_snapshot, end_snapshot, "
+                "data_file_id, path, path_is_relative, format, delete_count, "
+                "file_size_bytes, footer_size, encryption_key) "
+                "VALUES (?, ?, ?, NULL, ?, ?, ?, 'parquet', ?, ?, ?, NULL)",
+                [
+                    delete_file_id, table_id, new_snap, data_file_id,
+                    delete_file_name, True, len(positions),
+                    delete_file_size, delete_footer_size,
+                ],
+            )
+
+        # Delete matched inlined rows
+        if inlined_matched_df is not None and len(inlined_matched_df) > 0:
+            key_pred = self._build_key_match_predicate(
+                on, inlined_matched_df.select(on).unique(),
+            )
+            self._delete_inlined_rows(
+                table_id, key_pred, snap_id, new_snap, columns,
+            )
+
+        # ----------------------------------------------------------
+        # Phase 8: write new data file(s)
+        # ----------------------------------------------------------
+        existing_stats = self._get_table_stats(table_id)
+        row_id_start = existing_stats[1] if existing_stats else 0
+        mapping_id = self._register_name_mapping(table_id, columns)
+
+        if part_id is not None and group_list:
+            total_file_size = 0
+            current_data_file_id = first_data_file_id
+            current_row_id = row_id_start
+
+            for gk, gdf in group_list:
+                partition_values = [str(v) for v in gk]
+                hive_subdir = self._build_hive_path(
+                    part_col_names, partition_values,
+                )
+                partition_dir = os.path.join(base, hive_subdir)
+                os.makedirs(partition_dir, exist_ok=True)
+
+                file_name = f"ducklake-{_uuid7()}.parquet"
+                file_path = os.path.join(partition_dir, file_name)
+                gdf.write_parquet(file_path)
+
+                file_size = os.path.getsize(file_path)
+                footer_size = _read_parquet_footer_size(file_path)
+                rel_path = f"{hive_subdir}/{file_name}"
+
+                self._register_data_file(
+                    current_data_file_id, table_id, new_snap, rel_path,
+                    len(gdf), file_size, footer_size, current_row_id,
+                    part_id, mapping_id,
+                )
+                self._register_partition_values(
+                    current_data_file_id, table_id,
+                    part_key_indices, partition_values,
+                )
+                cs = self._compute_file_column_stats(gdf, columns)
+                self._register_file_column_stats(
+                    current_data_file_id, table_id, cs,
+                )
+
+                total_file_size += file_size
+                current_data_file_id += 1
+                current_row_id += len(gdf)
+
+            self._update_table_stats(table_id, len(insert_df), total_file_size)
+        elif len(insert_df) > 0:
+            file_name = f"ducklake-{_uuid7()}.parquet"
+            file_path = os.path.join(base, file_name)
+            insert_df.write_parquet(file_path)
+
+            file_size = os.path.getsize(file_path)
+            footer_size = _read_parquet_footer_size(file_path)
+
+            self._register_data_file(
+                first_data_file_id, table_id, new_snap, file_name,
+                len(insert_df), file_size, footer_size, row_id_start,
+                None, mapping_id,
+            )
+
+            col_stats = self._compute_file_column_stats(insert_df, columns)
+            self._register_file_column_stats(
+                first_data_file_id, table_id, col_stats,
+            )
+            self._update_table_stats(table_id, len(insert_df), file_size)
+
+        full_col_stats = self._compute_file_column_stats(insert_df, columns)
+        self._update_table_column_stats(table_id, columns, full_col_stats)
+
+        # Record changes
+        changes: list[str] = []
+        if total_updated > 0:
+            changes.append(f"deleted_from_table:{table_id}")
+        if total_updated > 0 or total_inserted > 0:
+            changes.append(f"inserted_into_table:{table_id}")
+        self._record_change(new_snap, ",".join(changes))
+
+        con.commit()
+        return (total_updated, total_inserted)
+
+    # ------------------------------------------------------------------
     # ALTER TABLE: ADD COLUMN
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
 
     def _get_max_column_id(self, table_id: int) -> int:
@@ -2058,10 +2642,10 @@ class DuckLakeCatalogWriter:
             "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
             "column_name, column_type, initial_default, default_value, "
             "nulls_allowed, parent_column) "
-            "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, NULL)",
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)",
             [
                 new_col_id, new_snap, table_id, new_col_order,
-                column_name, duckdb_type, default_str, default_str,
+                column_name, duckdb_type, default_str, default_str, True,
             ],
         )
 
@@ -2283,8 +2867,8 @@ class DuckLakeCatalogWriter:
             "INSERT INTO ducklake_schema "
             "(schema_id, schema_uuid, begin_snapshot, end_snapshot, "
             "schema_name, path, path_is_relative) "
-            "VALUES (?, ?, ?, NULL, ?, ?, 1)",
-            [schema_id, schema_uuid, new_snap, schema_name, schema_path],
+            "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+            [schema_id, schema_uuid, new_snap, schema_name, schema_path, True],
         )
 
         # Record schema version

@@ -55,6 +55,12 @@ class _PsycopgConnectionWrapper:
             self._cur.execute(sql, params)
         return self._cur
 
+    def commit(self) -> None:
+        self._con.commit()
+
+    def rollback(self) -> None:
+        self._con.rollback()
+
     def close(self) -> None:
         self._cur.close()
         self._con.close()
@@ -67,18 +73,31 @@ class PostgreSQLBackend:
     connection_string: str
     placeholder: str = "%s"
 
-    def connect(self) -> Any:
-        """Open a read-only PostgreSQL connection via psycopg2."""
+    def _import_psycopg2(self) -> Any:
+        """Import psycopg2, raising a clear error if not installed."""
         try:
             import psycopg2
+
+            return psycopg2
         except ImportError:
             msg = (
                 "psycopg2 is required for PostgreSQL catalog backends. "
                 "Install it with: pip install ducklake-polars[postgres]"
             )
             raise ImportError(msg) from None
+
+    def connect(self) -> Any:
+        """Open a read-only PostgreSQL connection via psycopg2."""
+        psycopg2 = self._import_psycopg2()
         con = psycopg2.connect(self.connection_string)
         con.set_session(readonly=True, autocommit=True)
+        return _PsycopgConnectionWrapper(con)
+
+    def connect_writable(self) -> Any:
+        """Open a read-write PostgreSQL connection via psycopg2."""
+        psycopg2 = self._import_psycopg2()
+        con = psycopg2.connect(self.connection_string)
+        # autocommit=False (default) — caller manages transactions via commit()
         return _PsycopgConnectionWrapper(con)
 
     def is_table_not_found(self, exc: BaseException) -> bool:

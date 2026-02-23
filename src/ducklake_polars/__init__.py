@@ -20,6 +20,8 @@ __all__ = [
     "create_ducklake_table",
     "delete_ducklake",
     "update_ducklake",
+    "merge_ducklake",
+    "create_table_as_ducklake",
     "alter_ducklake_add_column",
     "alter_ducklake_drop_column",
     "alter_ducklake_rename_column",
@@ -170,7 +172,7 @@ def write_ducklake(
         DataFrame to write.
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to write to.
     schema
@@ -251,7 +253,7 @@ def create_ducklake_table(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to create.
     polars_schema
@@ -295,7 +297,7 @@ def delete_ducklake(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to delete from.
     predicate
@@ -348,7 +350,7 @@ def update_ducklake(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to update.
     updates
@@ -383,6 +385,126 @@ def update_ducklake(
         return writer.update_data(updates, predicate, table, schema_name=schema)
 
 
+def merge_ducklake(
+    path: str | Path,
+    table: str,
+    source_df: pl.DataFrame,
+    on: str | list[str],
+    *,
+    when_matched_update: dict[str, object] | bool | None = None,
+    when_not_matched_insert: bool = True,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+) -> tuple[int, int]:
+    """
+    Merge a source DataFrame into an existing DuckLake table.
+
+    Matches rows on the *on* key columns, optionally updates matched
+    target rows, and optionally inserts unmatched source rows. Implemented
+    as delete + insert in a single snapshot.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the target table.
+    source_df
+        Source DataFrame to merge from.
+    on
+        Column name(s) to match on. Can be a single string or a list.
+    when_matched_update
+        - ``None``: matched target rows are left untouched.
+        - ``True``: replace matched target rows with source rows.
+        - ``dict``: update matched target rows with these values
+          (literal or ``pl.Expr``).
+    when_not_matched_insert
+        If True (default), source rows that have no match in the
+        target are inserted.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of inlined rows.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(rows_updated, rows_inserted)``.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+    ) as writer:
+        return writer.merge_data(
+            source_df,
+            table,
+            on,
+            when_matched_update=when_matched_update,
+            when_not_matched_insert=when_not_matched_insert,
+            schema_name=schema,
+        )
+
+
+def create_table_as_ducklake(
+    df: pl.DataFrame,
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+) -> None:
+    """
+    Create a new table and insert data in a single snapshot.
+
+    Equivalent to ``CREATE TABLE ... AS SELECT ...`` — the table schema
+    is inferred from the DataFrame and the data is written atomically.
+
+    Parameters
+    ----------
+    df
+        DataFrame whose schema defines the new table and whose rows
+        are the initial data.
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the table to create.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of rows to store inline in the metadata catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table already exists.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+    ) as writer:
+        writer.create_table_with_data(table, df, schema_name=schema)
+
+
 def alter_ducklake_add_column(
     path: str | Path,
     table: str,
@@ -400,7 +522,7 @@ def alter_ducklake_add_column(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to alter.
     col_name
@@ -444,7 +566,7 @@ def alter_ducklake_drop_column(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to alter.
     col_name
@@ -484,7 +606,7 @@ def alter_ducklake_rename_column(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to alter.
     old_col_name
@@ -527,7 +649,7 @@ def drop_ducklake_table(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to drop.
     schema
@@ -562,7 +684,7 @@ def create_ducklake_schema(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     schema_name
         Name of the schema to create.
     data_path
@@ -596,7 +718,7 @@ def drop_ducklake_schema(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     schema_name
         Name of the schema to drop.
     cascade
@@ -634,7 +756,7 @@ def rename_ducklake_table(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     old_table
         Current name of the table.
     new_table
@@ -677,7 +799,7 @@ def alter_ducklake_set_partitioned_by(
     ----------
     path
         Path to the DuckLake metadata catalog file (.ducklake or .db).
-        Currently only SQLite backends are supported for writes.
+        Supports SQLite and PostgreSQL backends.
     table
         Name of the table to partition.
     columns
