@@ -123,11 +123,15 @@ class DuckLakeCatalogWriter:
         *,
         data_path_override: str | None = None,
         data_inlining_row_limit: int = 0,
+        author: str | None = None,
+        commit_message: str | None = None,
     ) -> None:
         self._backend = create_backend(metadata_path)
         self._metadata_path = metadata_path
         self._data_path_override = data_path_override
         self._data_inlining_row_limit = data_inlining_row_limit
+        self._author = author
+        self._commit_message = commit_message
         self._con: Any = None
 
     def _connect(self) -> Any:
@@ -189,13 +193,17 @@ class DuckLakeCatalogWriter:
         snapshot_id: int,
         changes_made: str,
     ) -> None:
-        """Insert a snapshot_changes record."""
+        """Insert a snapshot_changes record.
+
+        Uses the ``author`` and ``commit_message`` stored on the writer
+        instance (set via the constructor).
+        """
         con = self._connect()
         con.execute(
             "INSERT INTO ducklake_snapshot_changes "
             "(snapshot_id, changes_made, author, commit_message, commit_extra_info) "
-            "VALUES (?, ?, NULL, NULL, NULL)",
-            [snapshot_id, changes_made],
+            "VALUES (?, ?, ?, ?, NULL)",
+            [snapshot_id, changes_made, self._author, self._commit_message],
         )
 
     # ------------------------------------------------------------------
@@ -3245,3 +3253,232 @@ class DuckLakeCatalogWriter:
         self._record_change(new_snap, f"altered_table:{table_id}")
 
         con.commit()
+
+    # ------------------------------------------------------------------
+    # EXPIRE SNAPSHOTS
+    # ------------------------------------------------------------------
+
+    def expire_snapshots(
+        self,
+        *,
+        older_than_snapshot: int | None = None,
+        keep_last_n: int | None = None,
+    ) -> int:
+        """Expire old snapshots and clean up associated metadata.
+
+        Removes snapshot rows, snapshot_changes entries, and metadata
+        entries (data files, delete files, column stats, partition
+        values) whose ``end_snapshot`` falls within the expired range.
+        This is a metadata-only operation — actual Parquet file deletion
+        is handled by :meth:`vacuum`.
+
+        Parameters
+        ----------
+        older_than_snapshot
+            Expire all snapshots with ``snapshot_id < older_than_snapshot``.
+        keep_last_n
+            Keep the most recent *n* snapshots, expire the rest.
+            Cannot be combined with *older_than_snapshot*.
+
+        Returns
+        -------
+        int
+            The number of snapshots expired.
+        """
+        if older_than_snapshot is not None and keep_last_n is not None:
+            msg = "Cannot specify both older_than_snapshot and keep_last_n"
+            raise ValueError(msg)
+        if older_than_snapshot is None and keep_last_n is None:
+            msg = "Must specify either older_than_snapshot or keep_last_n"
+            raise ValueError(msg)
+
+        con = self._connect()
+
+        # Determine the expiry boundary
+        if keep_last_n is not None:
+            if keep_last_n < 1:
+                msg = "keep_last_n must be >= 1"
+                raise ValueError(msg)
+            rows = con.execute(
+                "SELECT snapshot_id FROM ducklake_snapshot "
+                "ORDER BY snapshot_id DESC"
+            ).fetchall()
+            all_ids = [r[0] for r in rows]
+            if len(all_ids) <= keep_last_n:
+                return 0
+            # Expire everything before the Nth-from-last
+            older_than_snapshot = all_ids[keep_last_n - 1]
+
+        assert older_than_snapshot is not None
+
+        # Find snapshots to expire
+        expire_rows = con.execute(
+            "SELECT snapshot_id FROM ducklake_snapshot "
+            "WHERE snapshot_id < ?",
+            [older_than_snapshot],
+        ).fetchall()
+        expire_ids = [r[0] for r in expire_rows]
+
+        if not expire_ids:
+            return 0
+
+        # Clean up metadata for files that ended within the expired range.
+        # Files with end_snapshot <= older_than_snapshot are no longer
+        # reachable by any remaining snapshot.
+        boundary = older_than_snapshot
+
+        # Delete file column stats for expired data files
+        con.execute(
+            "DELETE FROM ducklake_file_column_stats "
+            "WHERE data_file_id IN ("
+            "  SELECT data_file_id FROM ducklake_data_file "
+            "  WHERE end_snapshot IS NOT NULL AND end_snapshot <= ?"
+            ")",
+            [boundary],
+        )
+
+        # Delete partition values for expired data files
+        try:
+            con.execute(
+                "DELETE FROM ducklake_file_partition_value "
+                "WHERE data_file_id IN ("
+                "  SELECT data_file_id FROM ducklake_data_file "
+                "  WHERE end_snapshot IS NOT NULL AND end_snapshot <= ?"
+                ")",
+                [boundary],
+            )
+        except Exception:
+            pass  # table may not exist
+
+        # Delete expired data files
+        con.execute(
+            "DELETE FROM ducklake_data_file "
+            "WHERE end_snapshot IS NOT NULL AND end_snapshot <= ?",
+            [boundary],
+        )
+
+        # Delete expired delete files
+        con.execute(
+            "DELETE FROM ducklake_delete_file "
+            "WHERE end_snapshot IS NOT NULL AND end_snapshot <= ?",
+            [boundary],
+        )
+
+        # Delete snapshot_changes for expired snapshots
+        for sid in expire_ids:
+            con.execute(
+                "DELETE FROM ducklake_snapshot_changes WHERE snapshot_id = ?",
+                [sid],
+            )
+
+        # Delete the snapshot rows themselves
+        for sid in expire_ids:
+            con.execute(
+                "DELETE FROM ducklake_snapshot WHERE snapshot_id = ?",
+                [sid],
+            )
+
+        con.commit()
+        return len(expire_ids)
+
+    # ------------------------------------------------------------------
+    # VACUUM — delete orphaned Parquet files
+    # ------------------------------------------------------------------
+
+    def vacuum(self) -> int:
+        """Delete orphaned Parquet files not referenced by any catalog entry.
+
+        Scans all data and delete file paths stored in the catalog
+        (including files that haven't been expired yet), then walks the
+        data directory and removes any ``.parquet`` files that are not
+        in the catalog.
+
+        Returns the number of files deleted.
+        """
+        con = self._connect()
+
+        # Collect all referenced file paths (relative to data_path)
+        # from both data files and delete files
+        referenced: set[str] = set()
+
+        # Get all schema/table paths for resolving relative file paths
+        schemas = con.execute(
+            "SELECT DISTINCT path, path_is_relative FROM ducklake_schema"
+        ).fetchall()
+        tables = con.execute(
+            "SELECT DISTINCT t.path, t.path_is_relative, s.path, s.path_is_relative "
+            "FROM ducklake_table t "
+            "JOIN ducklake_schema s ON t.schema_id = s.schema_id"
+        ).fetchall()
+
+        data_base = self.data_path
+
+        # Build full paths for all data files
+        data_files = con.execute(
+            "SELECT df.path, df.path_is_relative, t.path, t.path_is_relative, "
+            "s.path, s.path_is_relative "
+            "FROM ducklake_data_file df "
+            "JOIN ducklake_table t ON df.table_id = t.table_id "
+            "JOIN ducklake_schema s ON t.schema_id = s.schema_id"
+        ).fetchall()
+        for f_path, f_rel, t_path, t_rel, s_path, s_rel in data_files:
+            abs_path = self._resolve_vacuum_path(
+                f_path, bool(f_rel) if f_rel is not None else True,
+                t_path or "", bool(t_rel) if t_rel is not None else True,
+                s_path or "", bool(s_rel) if s_rel is not None else True,
+                data_base,
+            )
+            referenced.add(os.path.normpath(abs_path))
+
+        # Build full paths for all delete files
+        delete_files = con.execute(
+            "SELECT df.path, df.path_is_relative, t.path, t.path_is_relative, "
+            "s.path, s.path_is_relative "
+            "FROM ducklake_delete_file df "
+            "JOIN ducklake_table t ON df.table_id = t.table_id "
+            "JOIN ducklake_schema s ON t.schema_id = s.schema_id"
+        ).fetchall()
+        for f_path, f_rel, t_path, t_rel, s_path, s_rel in delete_files:
+            abs_path = self._resolve_vacuum_path(
+                f_path, bool(f_rel) if f_rel is not None else True,
+                t_path or "", bool(t_rel) if t_rel is not None else True,
+                s_path or "", bool(s_rel) if s_rel is not None else True,
+                data_base,
+            )
+            referenced.add(os.path.normpath(abs_path))
+
+        # Walk the data directory and find all .parquet files
+        deleted_count = 0
+        for dirpath, _dirnames, filenames in os.walk(data_base):
+            for fname in filenames:
+                if fname.endswith(".parquet"):
+                    full_path = os.path.normpath(os.path.join(dirpath, fname))
+                    if full_path not in referenced:
+                        os.remove(full_path)
+                        deleted_count += 1
+
+        return deleted_count
+
+    @staticmethod
+    def _resolve_vacuum_path(
+        file_path: str,
+        file_is_relative: bool,
+        table_path: str,
+        table_path_rel: bool,
+        schema_path: str,
+        schema_path_rel: bool,
+        data_base: str,
+    ) -> str:
+        """Resolve a file path for vacuum operations."""
+        if not file_is_relative:
+            return file_path
+        base = data_base
+        if schema_path_rel:
+            base = os.path.join(base, schema_path)
+        else:
+            base = schema_path
+        if table_path_rel:
+            base = os.path.join(base, table_path)
+        else:
+            base = table_path
+        return os.path.join(base, file_path)

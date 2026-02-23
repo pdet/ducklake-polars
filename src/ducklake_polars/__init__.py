@@ -30,6 +30,8 @@ __all__ = [
     "create_ducklake_schema",
     "drop_ducklake_schema",
     "rename_ducklake_table",
+    "expire_snapshots",
+    "vacuum_ducklake",
     "DuckLakeCatalog",
 ]
 
@@ -162,6 +164,8 @@ def write_ducklake(
     mode: str = "error",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Write a Polars DataFrame to a DuckLake table.
@@ -211,6 +215,8 @@ def write_ducklake(
         metadata_path,
         data_path_override=dp,
         data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
     ) as writer:
         snap_id, _sv, _nci, _nfi = writer._get_latest_snapshot()
         table_id = writer._table_exists(table, schema, snap_id)
@@ -245,6 +251,8 @@ def create_ducklake_table(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Create a new table in a DuckLake catalog.
@@ -273,7 +281,10 @@ def create_ducklake_table(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.create_table(table, polars_schema, schema_name=schema)
 
 
@@ -285,6 +296,8 @@ def delete_ducklake(
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> int:
     """
     Delete rows matching a predicate from a DuckLake table.
@@ -326,6 +339,8 @@ def delete_ducklake(
         metadata_path,
         data_path_override=dp,
         data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
     ) as writer:
         return writer.delete_data(predicate, table, schema_name=schema)
 
@@ -339,6 +354,8 @@ def update_ducklake(
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> int:
     """
     Update rows matching a predicate in a DuckLake table.
@@ -381,6 +398,8 @@ def update_ducklake(
         metadata_path,
         data_path_override=dp,
         data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
     ) as writer:
         return writer.update_data(updates, predicate, table, schema_name=schema)
 
@@ -396,6 +415,8 @@ def merge_ducklake(
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> tuple[int, int]:
     """
     Merge a source DataFrame into an existing DuckLake table.
@@ -444,6 +465,8 @@ def merge_ducklake(
         metadata_path,
         data_path_override=dp,
         data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
     ) as writer:
         return writer.merge_data(
             source_df,
@@ -463,6 +486,8 @@ def create_table_as_ducklake(
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Create a new table and insert data in a single snapshot.
@@ -501,6 +526,8 @@ def create_table_as_ducklake(
         metadata_path,
         data_path_override=dp,
         data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
     ) as writer:
         writer.create_table_with_data(table, df, schema_name=schema)
 
@@ -514,6 +541,8 @@ def alter_ducklake_add_column(
     default: object = None,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Add a column to a DuckLake table.
@@ -547,7 +576,10 @@ def alter_ducklake_add_column(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.add_column(table, col_name, dtype, default=default, schema_name=schema)
 
 
@@ -558,6 +590,8 @@ def alter_ducklake_drop_column(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Drop a column from a DuckLake table.
@@ -586,7 +620,10 @@ def alter_ducklake_drop_column(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.drop_column(table, col_name, schema_name=schema)
 
 
@@ -598,6 +635,8 @@ def alter_ducklake_rename_column(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Rename a column in a DuckLake table.
@@ -629,7 +668,10 @@ def alter_ducklake_rename_column(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.rename_column(
             table, old_col_name, new_col_name, schema_name=schema
         )
@@ -641,6 +683,8 @@ def drop_ducklake_table(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Drop a table from a DuckLake catalog.
@@ -667,7 +711,10 @@ def drop_ducklake_table(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.drop_table(table, schema_name=schema)
 
 
@@ -676,6 +723,8 @@ def create_ducklake_schema(
     schema_name: str,
     *,
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Create a new schema in a DuckLake catalog.
@@ -700,7 +749,10 @@ def create_ducklake_schema(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.create_schema(schema_name)
 
 
@@ -710,6 +762,8 @@ def drop_ducklake_schema(
     *,
     cascade: bool = False,
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Drop a schema from a DuckLake catalog.
@@ -737,7 +791,10 @@ def drop_ducklake_schema(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.drop_schema(schema_name, cascade=cascade)
 
 
@@ -748,6 +805,8 @@ def rename_ducklake_table(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Rename a table in a DuckLake catalog.
@@ -776,7 +835,10 @@ def rename_ducklake_table(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.rename_table(old_table, new_table, schema_name=schema)
 
 
@@ -787,6 +849,8 @@ def alter_ducklake_set_partitioned_by(
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
 ) -> None:
     """
     Set identity-transform partitioning on a DuckLake table.
@@ -819,5 +883,90 @@ def alter_ducklake_set_partitioned_by(
     metadata_path = os.fspath(path)
     dp = os.fspath(data_path) if data_path is not None else None
 
-    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
         writer.set_partitioned_by(table, columns, schema_name=schema)
+
+
+def expire_snapshots(
+    path: str | Path,
+    *,
+    older_than_snapshot: int | None = None,
+    keep_last_n: int | None = None,
+    data_path: str | Path | None = None,
+) -> int:
+    """
+    Expire old snapshots and clean up associated metadata.
+
+    Removes snapshot rows, snapshot_changes entries, and metadata
+    entries (data files, delete files, column stats, partition values)
+    whose ``end_snapshot`` falls within the expired range. This is a
+    metadata-only operation — call :func:`vacuum_ducklake` afterwards
+    to delete the actual orphaned Parquet files.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    older_than_snapshot
+        Expire all snapshots with ``snapshot_id < older_than_snapshot``.
+    keep_last_n
+        Keep the most recent *n* snapshots, expire the rest.
+        Cannot be combined with *older_than_snapshot*.
+    data_path
+        Override the data path stored in the catalog.
+
+    Returns
+    -------
+    int
+        The number of snapshots expired.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        return writer.expire_snapshots(
+            older_than_snapshot=older_than_snapshot,
+            keep_last_n=keep_last_n,
+        )
+
+
+def vacuum_ducklake(
+    path: str | Path,
+    *,
+    data_path: str | Path | None = None,
+) -> int:
+    """
+    Delete orphaned Parquet files not referenced by any catalog entry.
+
+    Scans the data directory for all ``.parquet`` files and removes
+    those that are not referenced by any ``ducklake_data_file`` or
+    ``ducklake_delete_file`` entry in the catalog. Run
+    :func:`expire_snapshots` first to clean up metadata for old
+    snapshots, then call this to reclaim disk space.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    data_path
+        Override the data path stored in the catalog.
+
+    Returns
+    -------
+    int
+        The number of Parquet files deleted.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        return writer.vacuum()
