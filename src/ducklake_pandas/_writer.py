@@ -1,66 +1,58 @@
-"""DuckLake catalog writer — Polars wrapper around Arrow-based core."""
+"""DuckLake catalog writer — Pandas wrapper around Arrow-based core."""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-import polars as pl
+import pandas as pd
 import pyarrow as pa
 
+from ducklake_core._schema import duckdb_type_to_arrow
 from ducklake_core._writer import DuckLakeCatalogWriter as _CoreWriter
 
 
-def _polars_schema_to_arrow_dict(
-    polars_schema: pl.Schema | dict[str, pl.DataType],
+def _pandas_schema_to_arrow_dict(
+    schema_dict: dict[str, str],
 ) -> dict[str, pa.DataType]:
-    """Convert a Polars schema to a dict of Arrow types."""
-    if isinstance(polars_schema, pl.Schema):
-        schema_dict = dict(polars_schema)
-    else:
-        schema_dict = polars_schema
-    # Create an empty DataFrame with the given schema and convert to Arrow
-    # to get reliable type mapping.
-    empty = pl.DataFrame(schema=schema_dict)
-    arrow_schema = empty.to_arrow().schema
-    return {field.name: field.type for field in arrow_schema}
+    """Convert a dict of {col_name: duckdb_type_string} to Arrow types."""
+    return {name: duckdb_type_to_arrow(dtype_str) for name, dtype_str in schema_dict.items()}
 
 
-def _polars_predicate_to_arrow(
-    pred: pl.Expr,
+def _pandas_predicate_to_arrow(
+    pred: Callable[[pd.DataFrame], pd.Series],
 ) -> Callable[[pa.Table], pa.ChunkedArray]:
-    """Wrap a Polars expression predicate as an Arrow-compatible callable."""
+    """Wrap a Pandas predicate callable as an Arrow-compatible callable."""
 
     def apply(table: pa.Table) -> pa.ChunkedArray:
-        df = pl.from_arrow(table)
-        mask = df.with_columns(pred.alias("__pred__"))["__pred__"]
-        return mask.to_arrow()
+        pdf = table.to_pandas()
+        mask = pred(pdf)
+        return pa.chunked_array([pa.array(mask.values, type=pa.bool_())])
 
     return apply
 
 
-def _polars_expr_to_arrow_callable(
-    expr: pl.Expr, col_name: str,
+def _pandas_expr_to_arrow_callable(
+    func: Callable[[pd.DataFrame], pd.Series], col_name: str,
 ) -> Callable[[pa.Table], pa.ChunkedArray]:
-    """Wrap a Polars expression (for update values) as an Arrow callable."""
+    """Wrap a Pandas callable (for update values) as an Arrow callable."""
 
     def apply(table: pa.Table) -> pa.ChunkedArray:
-        df = pl.from_arrow(table)
-        result = df.with_columns(expr.alias(col_name))[col_name]
-        return result.to_arrow()
+        pdf = table.to_pandas()
+        result = func(pdf)
+        return pa.chunked_array([pa.array(result.values)])
 
     return apply
 
 
 def _convert_updates(updates: dict[str, Any]) -> dict[str, Any]:
-    """Convert a Polars-style updates dict to an Arrow-compatible one.
+    """Convert a Pandas-style updates dict to an Arrow-compatible one.
 
-    ``pl.Expr`` values are wrapped in callables; literal values are
-    passed through unchanged.
+    Callable values are wrapped; literal values are passed through unchanged.
     """
     result: dict[str, Any] = {}
     for col_name, value in updates.items():
-        if isinstance(value, pl.Expr):
-            result[col_name] = _polars_expr_to_arrow_callable(value, col_name)
+        if callable(value):
+            result[col_name] = _pandas_expr_to_arrow_callable(value, col_name)
         else:
             result[col_name] = value
     return result
@@ -81,8 +73,8 @@ class DuckLakeCatalogWriter:
     """
     Writes metadata to a DuckLake catalog (SQLite or PostgreSQL).
 
-    Thin Polars wrapper around the Arrow-based core writer. Converts
-    ``pl.DataFrame`` → ``pa.Table`` and ``pl.Expr`` → Arrow callables
+    Thin Pandas wrapper around the Arrow-based core writer. Converts
+    ``pd.DataFrame`` → ``pa.Table`` and Pandas callables → Arrow callables
     at method boundaries before delegating.
     """
 
@@ -136,11 +128,11 @@ class DuckLakeCatalogWriter:
     def create_table(
         self,
         table_name: str,
-        polars_schema: pl.Schema | dict[str, pl.DataType],
+        schema_dict: dict[str, str],
         *,
         schema_name: str = "main",
     ) -> int:
-        arrow_schema = _polars_schema_to_arrow_dict(polars_schema)
+        arrow_schema = _pandas_schema_to_arrow_dict(schema_dict)
         return self._core.create_table(
             table_name, arrow_schema, schema_name=schema_name,
         )
@@ -148,12 +140,12 @@ class DuckLakeCatalogWriter:
     def create_table_with_data(
         self,
         table_name: str,
-        df: pl.DataFrame,
+        df: pd.DataFrame,
         *,
         schema_name: str = "main",
     ) -> int:
         return self._core.create_table_with_data(
-            table_name, df.to_arrow(), schema_name=schema_name,
+            table_name, pa.Table.from_pandas(df), schema_name=schema_name,
         )
 
     # ------------------------------------------------------------------
@@ -162,24 +154,24 @@ class DuckLakeCatalogWriter:
 
     def insert_data(
         self,
-        df: pl.DataFrame,
+        df: pd.DataFrame,
         table_name: str,
         *,
         schema_name: str = "main",
     ) -> int:
         return self._core.insert_data(
-            df.to_arrow(), table_name, schema_name=schema_name,
+            pa.Table.from_pandas(df), table_name, schema_name=schema_name,
         )
 
     def overwrite_data(
         self,
-        df: pl.DataFrame,
+        df: pd.DataFrame,
         table_name: str,
         *,
         schema_name: str = "main",
     ) -> int:
         return self._core.overwrite_data(
-            df.to_arrow(), table_name, schema_name=schema_name,
+            pa.Table.from_pandas(df), table_name, schema_name=schema_name,
         )
 
     # ------------------------------------------------------------------
@@ -188,13 +180,13 @@ class DuckLakeCatalogWriter:
 
     def delete_data(
         self,
-        predicate: pl.Expr,
+        predicate: Callable[[pd.DataFrame], pd.Series],
         table_name: str,
         *,
         schema_name: str = "main",
     ) -> int:
         return self._core.delete_data(
-            _polars_predicate_to_arrow(predicate),
+            _pandas_predicate_to_arrow(predicate),
             table_name,
             schema_name=schema_name,
         )
@@ -202,21 +194,21 @@ class DuckLakeCatalogWriter:
     def update_data(
         self,
         updates: dict[str, Any],
-        predicate: pl.Expr,
+        predicate: Callable[[pd.DataFrame], pd.Series],
         table_name: str,
         *,
         schema_name: str = "main",
     ) -> int:
         return self._core.update_data(
             _convert_updates(updates),
-            _polars_predicate_to_arrow(predicate),
+            _pandas_predicate_to_arrow(predicate),
             table_name,
             schema_name=schema_name,
         )
 
     def merge_data(
         self,
-        source_df: pl.DataFrame,
+        source_df: pd.DataFrame,
         table_name: str,
         on: str | list[str],
         *,
@@ -225,7 +217,7 @@ class DuckLakeCatalogWriter:
         schema_name: str = "main",
     ) -> tuple[int, int]:
         return self._core.merge_data(
-            source_df.to_arrow(),
+            pa.Table.from_pandas(source_df),
             table_name,
             on,
             when_matched_update=_convert_matched_update(when_matched_update),
@@ -241,12 +233,12 @@ class DuckLakeCatalogWriter:
         self,
         table_name: str,
         column_name: str,
-        polars_dtype: pl.DataType,
+        dtype_str: str,
         *,
         default: Any = None,
         schema_name: str = "main",
     ) -> None:
-        arrow_dtype = pl.Series("x", [], dtype=polars_dtype).to_arrow().type
+        arrow_dtype = duckdb_type_to_arrow(dtype_str)
         self._core.add_column(
             table_name, column_name, arrow_dtype,
             default=default, schema_name=schema_name,
