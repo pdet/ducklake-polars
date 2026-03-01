@@ -20,7 +20,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | ALTER TABLE DROP COLUMN | ✅ Full | ✅ `alter_ducklake_drop_column()` | ✅ `alter_ducklake_drop_column()` | ✅ Full |
 | ALTER TABLE RENAME COLUMN | ✅ Full | ✅ `alter_ducklake_rename_column()` | ✅ `alter_ducklake_rename_column()` | ✅ Full |
 | ALTER TABLE SET PARTITIONED BY | ✅ Identity transforms | ✅ `alter_ducklake_set_partitioned_by()` | ✅ `alter_ducklake_set_partitioned_by()` | ✅ Full |
-| ALTER TABLE SET TYPE (column type change) | ✅ Full | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
+| ALTER TABLE SET TYPE (column type change) | ✅ Full | ✅ `alter_ducklake_set_type()` | ✅ `alter_ducklake_set_type()` | ✅ Full |
 | CREATE SCHEMA | ✅ Full | ✅ `create_ducklake_schema()` | ✅ `create_ducklake_schema()` | ✅ Full |
 | DROP SCHEMA | ✅ Full (with CASCADE) | ✅ `drop_ducklake_schema()` | ✅ `drop_ducklake_schema()` | ✅ Full |
 | CREATE VIEW | ✅ Full SQL | ✅ `create_ducklake_view()` | ✅ `create_ducklake_view()` | ✅ Full |
@@ -63,7 +63,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | Add column | ✅ Full | ✅ `missing_columns="insert"` fills NULLs | ✅ NULL fill for missing columns | ✅ Full |
 | Drop column | ✅ Full | ✅ `extra_columns="ignore"` | ✅ Skip columns not in schema | ✅ Full |
 | Rename column | ✅ Full (field_id mapping) | ✅ Column history-based rename | ✅ Column history-based rename | ✅ Full |
-| Type change | ✅ Full | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
+| Type change | ✅ Full | ✅ `alter_ducklake_set_type()` | ✅ `alter_ducklake_set_type()` | ✅ Full |
 | Reading across schema versions | ✅ Transparent | ✅ Groups files by rename map | ✅ Per-file column matching | ✅ Full |
 | Struct field add/drop/rename | ✅ Full | ✅ Struct field history tracking | ✅ Struct field history tracking | ✅ Full |
 
@@ -112,7 +112,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 | Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
 |---|---|---|---|---|
-| Sort keys on write | ✅ Sorted output by configured keys | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
+| Sort keys on write | ✅ Sorted output by configured keys | ✅ `alter_ducklake_set_sort_keys()` | ✅ `alter_ducklake_set_sort_keys()` | ✅ Full |
 
 ### Encryption
 
@@ -152,7 +152,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | STRUCT(...) | ✅ | ✅ Recursive | ✅ Recursive | ✅ Full |
 | MAP(K,V) | ✅ | ⚠️ List(Struct(key,value)) — Polars reader issue | ✅ via Arrow map_ | ⚠️ Partial |
 | UNION | ✅ | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
-| ENUM | ✅ | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
+| ENUM | ✅ | ✅ (→ VARCHAR) | ✅ (→ VARCHAR) | ✅ Full |
 | GEOMETRY | ✅ | ✅ (Binary) | ✅ (Binary) | ✅ Full |
 | VARIANT | ✅ | ✅ (String) | ✅ (String) | ✅ Full |
 | BIT | ✅ | ✅ (String) | ✅ (String) | ✅ Full |
