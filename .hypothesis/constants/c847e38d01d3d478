@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_core/_backend.py
+# hypothesis_version: 6.151.9
+
+['%s', '42P01', '?', 'dbname=', 'host=', 'no such table', 'pgcode', 'postgres://', 'postgresql://']

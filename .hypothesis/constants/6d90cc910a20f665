@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_core/_catalog_api.py
+# hypothesis_version: 6.151.9
+
+['catalog_type', 'change_type', 'data_file', 'data_file_size_bytes', 'data_path', 'delete', 'delete_file', 'delete_file_count', 'delete_row_count', 'file_count', 'file_size_bytes', 'insert', 'key', 'main', 'permissive', 'pos', 'postgresql', 'schema_id', 'schema_name', 'schema_version', 'snapshot_id', 'snapshot_time', 'sqlite', 'table_id', 'table_name', 'update_postimage', 'update_preimage', 'value']

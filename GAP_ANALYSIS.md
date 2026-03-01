@@ -26,7 +26,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | CREATE VIEW | ✅ Full SQL | ✅ `create_ducklake_view()` | ✅ `create_ducklake_view()` | ✅ Full |
 | DROP VIEW | ✅ Full | ✅ `drop_ducklake_view()` | ✅ `drop_ducklake_view()` | ✅ Full |
 | CREATE VIEW OR REPLACE | ✅ Full | ✅ `or_replace=True` | ✅ `or_replace=True` | ✅ Full |
-| Tags (table/column metadata) | ✅ `ducklake_tag`, `ducklake_column_tag` | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
+| Tags (table/column metadata) | ✅ `ducklake_tag`, `ducklake_column_tag` | ✅ `set_ducklake_table_tag()` / `set_ducklake_column_tag()` | ✅ `set_ducklake_table_tag()` / `set_ducklake_column_tag()` | ✅ Full |
 
 ### DML — Data Manipulation Language
 
@@ -52,7 +52,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Identity transforms | ✅ Full | ✅ Hive-style directories | ✅ Hive-style directories | ✅ Full |
-| Partition pruning (read) | ✅ Full | ✅ Via partition values in stats | ✅ Not optimized (reads all files) | ⚠️ Partial |
+| Partition pruning (read) | ✅ Full | ✅ Via partition values in stats | ✅ Via predicate-based partition pruning | ✅ Full |
 | Partitioned writes | ✅ Full | ✅ One Parquet file per partition | ✅ One Parquet file per partition | ✅ Full |
 | Non-identity transforms (year, month, bucket, truncate) | ❌ Not in spec | ❌ Not implemented | ❌ Not implemented | N/A |
 
@@ -92,7 +92,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 | Table-level column stats | ✅ Full | ✅ Written on insert | ✅ Written on insert | ✅ Full |
 | Table-level row stats | ✅ Full | ✅ `record_count`, `file_size_bytes` | ✅ `record_count`, `file_size_bytes` | ✅ Full |
 | contains_nan tracking | ✅ Full | ✅ Full | ✅ Full | ✅ Full |
-| File pruning via stats | ✅ Full | ✅ Via Polars `_table_statistics` | ❌ Not implemented | ⚠️ Partial |
+| File pruning via stats | ✅ Full | ✅ Via Polars `_table_statistics` | ✅ Via predicate-based stats pruning | ✅ Full |
 
 ### Predicate Pushdown
 
@@ -209,37 +209,38 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ---
 
+## Recently Completed
+
+The following gaps have been resolved since the initial analysis:
+
+- ✅ **ENUM type support** — Mapped to VARCHAR on both Polars and Pandas. Roundtrip-tested with DuckDB interop.
+- ✅ **Tags (table/column metadata)** — Full read/write support via `set_ducklake_table_tag()`, `set_ducklake_column_tag()`, `delete_ducklake_table_tag()`, `delete_ducklake_column_tag()` on both Polars and Pandas. Exposed via `DuckLakeCatalog.table_tags()` / `.column_tags()`.
+- ✅ **Sort Keys** — `alter_ducklake_set_sort_keys()` implemented. Data is sorted before writing Parquet. Metadata stored and read correctly.
+- ✅ **Pandas partition pruning** — Predicate-based partition pruning via `_can_skip_file_by_partition()`. Files whose partition values don't match are skipped.
+- ✅ **Pandas stats pruning** — Predicate-based file pruning via `_can_skip_file_by_stats()`. Files whose min/max stats exclude the predicate range are skipped.
+- ✅ **ALTER TABLE SET TYPE** — `alter_ducklake_set_type()` implemented on both Polars and Pandas. Column type changes tracked in schema history.
+
+---
+
 ## Priority Gaps
 
-### 1. 🔴 ALTER TABLE SET TYPE (Column Type Changes) — High Impact
-
-DuckDB supports changing a column's type via `ALTER TABLE ... ALTER COLUMN ... SET TYPE ...`. Our implementation doesn't support this. Reading tables where DuckDB has changed a column type will produce incorrect results or errors since we don't track type changes in the column history.
-
-**Impact:** Users who evolve schemas with type widening (e.g., INT32 → INT64, VARCHAR → TEXT) in DuckDB will hit breakage when reading with our tools.
-
-### 2. 🔴 Object Storage Support (S3, GCS, Azure) — High Impact
+### 1. 🔴 Object Storage Support (S3, GCS, Azure) — High Impact
 
 DuckDB's ducklake extension can read/write Parquet files from S3, GCS, and Azure Blob Storage via its httpfs extension. Our implementation is strictly local filesystem. This is the single biggest barrier to production adoption since most real-world data lakes live on object storage.
 
 **Impact:** Blocks use for any cloud-based data lake. This is table stakes for production usage.
 
-### 3. 🟠 Concurrent Write Safety — Medium-High Impact
+### 2. 🟠 Concurrent Write Safety — Medium-High Impact
 
 DuckDB handles concurrent writes through its own transaction isolation. Our writer has no conflict detection — two concurrent `write_ducklake()` calls to the same table can corrupt metadata. At minimum, we need optimistic concurrency control (check snapshot version before commit).
 
 **Impact:** Multi-process or multi-user setups are unsafe. Single-writer scenarios are fine.
 
-### 4. 🟠 Sort Keys — Medium Impact
+### 3. 🟡 UNION Type — Low Impact
 
-DuckDB supports sort keys that ensure data files are written in sorted order, which dramatically improves min/max statistics effectiveness and enables zone-map-style file pruning. Our writer writes data in whatever order it arrives.
+DuckDB supports the UNION type, which is not mapped in our type system. This is rare in practice.
 
-**Impact:** Degrades query performance for range filters. Not a correctness issue, but a significant performance gap for large tables.
-
-### 5. 🟡 ENUM / UNION Types — Medium-Low Impact
-
-DuckDB supports ENUM and UNION types which are missing from our type mapping. ENUM is used in real schemas; UNION is rarer. Reading tables with these types will error out.
-
-**Impact:** Niche but annoying. ENUM is more likely to appear in practice than UNION.
+**Impact:** Niche. UNION types are uncommon in real schemas.
 
 ---
 
@@ -251,24 +252,14 @@ DuckDB supports ENUM and UNION types which are missing from our type mapping. EN
 
 2. **Optimistic concurrency control** — Before committing a new snapshot, verify the latest snapshot_id hasn't changed since we started. Retry or raise on conflict. Simple but critical.
 
-3. **ALTER TABLE SET TYPE** — Track type changes in column history. On read, cast columns from their physical type to the current type. On write, validate against the current schema type.
+### Phase 2 — Completeness (Next)
 
-### Phase 2 — Performance (Next)
+3. **MySQL backend** — Add a MySQL backend adapter alongside SQLite and PostgreSQL. The DuckLake schema is standard SQL; should be straightforward.
 
-4. **Sort keys** — Accept sort key configuration on table creation or via `ALTER TABLE SET SORT KEY`. Sort data before writing Parquet. Store sort key metadata. This improves file pruning dramatically.
+4. **UNION type support** — Map UNION to a struct-of-optionals or string fallback.
 
-5. **Pandas lazy read / partition pruning** — The pandas reader reads all files eagerly. Add partition pruning (at minimum, skip files based on partition values when a predicate is provided).
+5. **Encryption support** — Read the `encryption_key` from metadata and use it to decrypt Parquet files. Write encrypted files and store the key. Depends on pyarrow encryption support.
 
-### Phase 3 — Completeness (Later)
+6. **Automatic inline promotion** — When inlined row count exceeds threshold on insert, automatically promote to Parquet (currently only happens on overwrite).
 
-6. **MySQL backend** — Add a MySQL backend adapter alongside SQLite and PostgreSQL. The DuckLake schema is standard SQL; should be straightforward.
-
-7. **ENUM / UNION type support** — Map ENUM to Polars Categorical / Arrow DictionaryType. UNION to a struct-of-optionals or string fallback.
-
-8. **Encryption support** — Read the `encryption_key` from metadata and use it to decrypt Parquet files. Write encrypted files and store the key. Depends on pyarrow encryption support.
-
-9. **Tags** — Implement read/write for `ducklake_tag` and `ducklake_column_tag` tables. Expose via the `DuckLakeCatalog` API.
-
-10. **Automatic inline promotion** — When inlined row count exceeds threshold on insert, automatically promote to Parquet (currently only happens on overwrite).
-
-11. **Concurrent write transactions** — Full MVCC-style conflict detection with retry logic, beyond simple optimistic checks.
+7. **Concurrent write transactions** — Full MVCC-style conflict detection with retry logic, beyond simple optimistic checks.

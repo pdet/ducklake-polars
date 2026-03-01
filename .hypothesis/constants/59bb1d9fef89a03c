@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_core/_writer.py
+# hypothesis_version: 6.151.9
+
+[128, 1000, 4095, 72057594037927935, '"', '""', '"row_id" BIGINT', '"row_id", ', '%2F', '%3D', "'", "''", ',', ', ', '.parquet', '/', '0', '1', '<I', '=', '?', 'BIGINT', 'DOUBLE', 'DOUBLE PRECISION', 'NULL', 'VARCHAR', '__merge_idx__', '_con', '_placeholder', 'asc', 'ascending', 'begin_snapshot', 'big', 'bigint', 'boolean', 'commit', 'date', 'decimal', 'descending', 'double', 'dropped_schema', 'dropped_table', 'element', 'end_snapshot', 'false', 'file_path', 'float', 'float32', 'float64', 'int16', 'int32', 'int64', 'int8', 'integer', 'main', 'pos', 'rb', 'row_id', 'smallint', 'time', 'timestamp', 'tinyint', 'true', 'uint16', 'uint32', 'uint64', 'uint8']

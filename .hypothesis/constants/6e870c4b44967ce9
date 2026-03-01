@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_polars/_dataset.py
+# hypothesis_version: 6.151.9
+
+['.parquet', '__ducklake_dropped_', '_deletion_files', '_table_statistics', 'allow', 'cast_options', 'diagonal_relaxed', 'extra_columns', 'identity', 'ignore', 'insert', 'missing_columns', 'schema', 'struct', 'upcast', 'us']

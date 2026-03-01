@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/tests_pandas/conftest.py
+# hypothesis_version: 6.151.9
+
+['"', '""', '%s', '?', 'DUCKLAKE_PG_DSN', 'DuckLakeTestCatalog', 'data', 'ducklake', 'postgres', 'sqlite', 'sqlite_scanner', 'test.ducklake', 'write_test.ducklake']

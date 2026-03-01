@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_polars/_stats.py
+# hypothesis_version: 6.151.9
+
+["'", "''", '0', '1', 'NULL', 'false', 'len', 'true']

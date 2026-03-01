@@ -1,0 +1,4 @@
+# file: /home/pdet/.openclaw/workspace/ducklake-polars/src/ducklake_pandas/__init__.py
+# hypothesis_version: 6.151.9
+
+[b'PARQUET:field_id', 'DuckLakeCatalog', '__ducklake_dropped_', '__iter__', 'append', 'create_ducklake_view', 'delete_ducklake', 'drop_ducklake_schema', 'drop_ducklake_table', 'drop_ducklake_view', 'error', 'expire_snapshots', 'identity', 'main', 'merge_ducklake', 'overwrite', 'permissive', 'pos', 'read_ducklake', 'struct', 'update_ducklake', 'vacuum_ducklake', 'write_ducklake']
