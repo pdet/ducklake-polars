@@ -188,6 +188,10 @@ def arrow_type_to_duckdb(dtype: pa.DataType) -> str:
     if pa.types.is_map(dtype):
         return "map"
 
+    # Dictionary (e.g. from Polars Categorical/Enum) → store as varchar
+    if pa.types.is_dictionary(dtype):
+        return "varchar"
+
     # Fixed-size binary
     if pa.types.is_fixed_size_binary(dtype):
         return "blob"

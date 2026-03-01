@@ -617,6 +617,106 @@ class TestStringEdgeCases:
         assert values.count("hello") == 1
 
 
+class TestCategoricalEnumTypes:
+    """Test Categorical / Enum type handling (mapped to VARCHAR in DuckLake)."""
+
+    def test_read_varchar_as_string(self, ducklake_catalog):
+        """VARCHAR columns written by DuckDB are read back as String by Polars."""
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (id INTEGER, color VARCHAR)")
+        cat.execute(
+            "INSERT INTO ducklake.test VALUES (1, 'red'), (2, 'green'), (3, 'blue')"
+        )
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.schema == {"id": pl.Int32, "color": pl.String}
+        assert result.sort("id")["color"].to_list() == ["red", "green", "blue"]
+
+    def test_write_categorical_read_string(self, make_write_catalog):
+        """Polars Categorical columns are stored as VARCHAR and read back as String."""
+        from ducklake_polars import write_ducklake
+
+        cat = make_write_catalog()
+        df = pl.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "color": pl.Series(["red", "green", "blue"]).cast(pl.Categorical),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (3, 2)
+        assert result.schema["color"] == pl.String
+        result = result.sort("id")
+        assert result["color"].to_list() == ["red", "green", "blue"]
+
+    def test_write_enum_read_string(self, make_write_catalog):
+        """Polars Enum columns are stored as VARCHAR and read back as String."""
+        from ducklake_polars import write_ducklake
+
+        cat = make_write_catalog()
+        color_type = pl.Enum(["red", "green", "blue"])
+        df = pl.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "color": pl.Series(["red", "green", "blue"]).cast(color_type),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (3, 2)
+        assert result.schema["color"] == pl.String
+        result = result.sort("id")
+        assert result["color"].to_list() == ["red", "green", "blue"]
+
+    def test_categorical_with_nulls(self, make_write_catalog):
+        """Categorical columns with null values are handled correctly."""
+        from ducklake_polars import write_ducklake
+
+        cat = make_write_catalog()
+        df = pl.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "color": pl.Series(["red", None, "blue"]).cast(pl.Categorical),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        result = result.sort("id")
+        assert result["color"].to_list() == ["red", None, "blue"]
+
+    def test_categorical_filter(self, make_write_catalog):
+        """Categorical columns can be filtered after reading as String."""
+        from ducklake_polars import write_ducklake
+
+        cat = make_write_catalog()
+        df = pl.DataFrame(
+            {
+                "id": [1, 2, 3, 4],
+                "color": pl.Series(["red", "green", "blue", "red"]).cast(
+                    pl.Categorical
+                ),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = (
+            scan_ducklake(cat.metadata_path, "test")
+            .filter(pl.col("color") == "red")
+            .collect()
+        )
+        assert result.shape == (2, 2)
+        assert result.sort("id")["id"].to_list() == [1, 4]
+
+
 class TestVariantType:
     """Test VARIANT type handling."""
 

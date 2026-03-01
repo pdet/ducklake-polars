@@ -584,6 +584,63 @@ class TestStringEdgeCases:
         assert values.count("hello") == 1
 
 
+class TestCategoricalTypes:
+    """Test Categorical / dictionary type handling (mapped to VARCHAR in DuckLake)."""
+
+    def test_read_varchar_as_string(self, ducklake_catalog):
+        """VARCHAR columns written by DuckDB are read back as object/string."""
+        cat = ducklake_catalog
+        cat.execute("CREATE TABLE ducklake.test (id INTEGER, color VARCHAR)")
+        cat.execute(
+            "INSERT INTO ducklake.test VALUES (1, 'red'), (2, 'green'), (3, 'blue')"
+        )
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        result = result.sort_values("id").reset_index(drop=True)
+        assert result["color"].tolist() == ["red", "green", "blue"]
+
+    def test_write_categorical_read_string(self, make_write_catalog):
+        """Pandas Categorical columns are stored as VARCHAR and read back as string."""
+        from ducklake_pandas import write_ducklake
+
+        cat = make_write_catalog()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "color": pd.Categorical(["red", "green", "blue"]),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape == (3, 2)
+        result = result.sort_values("id").reset_index(drop=True)
+        assert result["color"].tolist() == ["red", "green", "blue"]
+
+    def test_categorical_with_nulls(self, make_write_catalog):
+        """Categorical columns with null values are handled correctly."""
+        from ducklake_pandas import write_ducklake
+
+        cat = make_write_catalog()
+        df = pd.DataFrame(
+            {
+                "id": [1, 2, 3],
+                "color": pd.Categorical(["red", None, "blue"]),
+            }
+        )
+
+        write_ducklake(df, cat.metadata_path, "test")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        result = result.sort_values("id").reset_index(drop=True)
+        assert result["color"].iloc[0] == "red"
+        assert result["color"].iloc[2] == "blue"
+        # null check: pandas represents nulls as NaN for object dtype
+        assert pd.isna(result["color"].iloc[1])
+
+
 class TestVariantType:
     """Test VARIANT type handling."""
 

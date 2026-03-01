@@ -494,6 +494,7 @@ class DuckLakeDataset:
                 float_cast="upcast",
                 missing_struct_fields="insert",
                 extra_struct_fields="ignore",
+                categorical_to_string="allow",
             ),
         }
 

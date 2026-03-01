@@ -67,6 +67,10 @@ class TestPolarsTypeToDuckdb:
         assert polars_type_to_duckdb(pl.List(pl.Int32())) == "list"
         assert polars_type_to_duckdb(pl.Struct({"a": pl.Int32()})) == "struct"
 
+    def test_categorical_and_enum(self):
+        assert polars_type_to_duckdb(pl.Categorical()) == "varchar"
+        assert polars_type_to_duckdb(pl.Enum(["a", "b", "c"])) == "varchar"
+
     def test_unsupported_raises(self):
         with pytest.raises(ValueError, match="Cannot map Polars type"):
             polars_type_to_duckdb(pl.Null())

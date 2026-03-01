@@ -280,6 +280,13 @@ def polars_type_to_duckdb(dtype: pl.DataType) -> str:
     if base is pl.Array:
         return "list"
 
+    # Categorical / Enum → store as varchar (ENUM is catalog-level in DuckDB,
+    # not stored in parquet; we flatten to plain strings)
+    if base is pl.Categorical:
+        return "varchar"
+    if base is pl.Enum:
+        return "varchar"
+
     msg = f"Cannot map Polars type {dtype} to DuckDB type"
     raise ValueError(msg)
 
