@@ -3517,8 +3517,8 @@ class DuckLakeCatalogWriter:
 
     def _get_active_sort_keys(
         self, table_id: int, snapshot_id: int
-    ) -> list[tuple[str, str]] | None:
-        """Return active sort keys as [(column_name, direction)] or None.
+    ) -> list[tuple[str, str, str]] | None:
+        """Return active sort keys as [(column_name, direction, null_order)] or None.
 
         Returns None if no sort keys are defined for the table.
         """
@@ -3540,10 +3540,11 @@ class DuckLakeCatalogWriter:
         # Get column names from sort expressions
         columns = self._get_columns_for_table(table_id, snapshot_id)
         col_id_to_name: dict[str, str] = {str(c[0]): c[1] for c in columns}
+        col_names_set = {c[1] for c in columns}
 
         try:
             rows = con.execute(
-                "SELECT sort_key_index, expression, sort_direction "
+                "SELECT sort_key_index, expression, sort_direction, null_order "
                 "FROM ducklake_sort_expression "
                 "WHERE sort_id = ? AND table_id = ? "
                 "ORDER BY sort_key_index",
@@ -3553,22 +3554,34 @@ class DuckLakeCatalogWriter:
             return None
 
         result = []
-        for _idx, expr, direction in rows:
-            col_name = col_id_to_name.get(expr)
+        for _idx, expr, direction, null_order in rows:
+            # expression can be column name (v1.5) or column ID (legacy)
+            if expr in col_names_set:
+                col_name = expr
+            else:
+                col_name = col_id_to_name.get(expr)
             if col_name is None:
                 continue
-            result.append((col_name, direction or "asc"))
+            direction = (direction or "ASC").upper()
+            null_order = (null_order or "NULLS_LAST").upper()
+            result.append((col_name, direction, null_order))
 
         return result if result else None
 
     def _sort_table_by_keys(
-        self, df: pa.Table, sort_keys: list[tuple[str, str]]
+        self, df: pa.Table, sort_keys: list[tuple[str, str, str]]
     ) -> pa.Table:
-        """Sort an Arrow table by the given sort keys."""
+        """Sort an Arrow table by the given sort keys.
+
+        Each key is ``(column_name, direction, null_order)`` where
+        *direction* is ``ASC``/``DESC`` and *null_order* is
+        ``NULLS_FIRST``/``NULLS_LAST``.
+        """
         sort_cols = []
-        for col_name, direction in sort_keys:
+        for col_name, direction, null_order in sort_keys:
             if col_name in df.schema.names:
-                sort_cols.append((col_name, "ascending" if direction == "asc" else "descending"))
+                order = "ascending" if direction.upper() == "ASC" else "descending"
+                sort_cols.append((col_name, order))
         if not sort_cols:
             return df
         indices = pc.sort_indices(df, sort_keys=sort_cols)
@@ -3587,13 +3600,19 @@ class DuckLakeCatalogWriter:
     def set_sort_keys(
         self,
         table_name: str,
-        column_names: list[str],
+        sort_keys: list[str | tuple[str, str] | tuple[str, str, str]],
         *,
         schema_name: str = "main",
     ) -> None:
         """Set sort keys on an existing table.
 
-        Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2, ...)``.
+        Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2 DESC, ...)``.
+
+        *sort_keys* accepts:
+        - ``"col"`` → ascending, nulls last
+        - ``("col", "DESC")`` → descending, nulls last
+        - ``("col", "ASC", "NULLS_FIRST")`` → ascending, nulls first
+
         Future writes will sort data by these columns before writing
         Parquet files, improving filter pushdown via row group statistics.
         """
@@ -3608,11 +3627,29 @@ class DuckLakeCatalogWriter:
             raise ValueError(msg)
 
         columns = self._get_columns_for_table(table_id, snap_id)
-        col_name_to_id: dict[str, int] = {c[1]: c[0] for c in columns}
-        for name in column_names:
-            if name not in col_name_to_id:
+        col_names_set = {c[1] for c in columns}
+
+        # Normalise sort_keys into (name, direction, null_order) triples
+        normalised: list[tuple[str, str, str]] = []
+        for key in sort_keys:
+            if isinstance(key, str):
+                name, direction, null_order = key, "ASC", "NULLS_LAST"
+            elif len(key) == 2:
+                name, direction = key[0], key[1].upper()
+                null_order = "NULLS_LAST"
+            else:
+                name, direction, null_order = key[0], key[1].upper(), key[2].upper()
+
+            if name not in col_names_set:
                 msg = f"Column '{name}' not found in '{schema_name}.{table_name}'"
                 raise ValueError(msg)
+            if direction not in ("ASC", "DESC"):
+                msg = f"Invalid sort direction '{direction}'; expected ASC or DESC"
+                raise ValueError(msg)
+            if null_order not in ("NULLS_FIRST", "NULLS_LAST"):
+                msg = f"Invalid null order '{null_order}'; expected NULLS_FIRST or NULLS_LAST"
+                raise ValueError(msg)
+            normalised.append((name, direction, null_order))
 
         sort_id = next_cat_id
         new_next_cat_id = next_cat_id + 1
@@ -3637,14 +3674,13 @@ class DuckLakeCatalogWriter:
             [sort_id, table_id, new_snap],
         )
 
-        for key_index, col_name in enumerate(column_names):
-            col_id = col_name_to_id[col_name]
+        for key_index, (col_name, direction, null_order) in enumerate(normalised):
             con.execute(
                 "INSERT INTO ducklake_sort_expression "
                 "(sort_id, table_id, sort_key_index, expression, dialect, "
                 "sort_direction, null_order) "
-                "VALUES (?, ?, ?, ?, 'duckdb', 'asc', 'nulls_last')",
-                [sort_id, table_id, key_index, str(col_id)],
+                "VALUES (?, ?, ?, ?, 'duckdb', ?, ?)",
+                [sort_id, table_id, key_index, col_name, direction, null_order],
             )
 
         con.execute(
@@ -3655,6 +3691,49 @@ class DuckLakeCatalogWriter:
 
         self._record_change(new_snap, f"altered_table:{table_id}")
 
+        con.commit()
+
+    def reset_sort_keys(
+        self,
+        table_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Remove sort keys from a table.
+
+        Equivalent to ``ALTER TABLE t RESET SORTED BY``.
+        """
+        con = self._connect()
+        self._ensure_sort_tables()
+
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        # Check if there are active sort keys
+        existing = self._get_active_sort_keys(table_id, snap_id)
+        if existing is None:
+            return  # Nothing to reset
+
+        new_schema_ver = schema_ver + 1
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        con.execute(
+            "UPDATE ducklake_sort_info SET end_snapshot = ? "
+            "WHERE table_id = ? AND end_snapshot IS NULL",
+            [new_snap, table_id],
+        )
+
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version, table_id) "
+            "VALUES (?, ?, ?)",
+            [new_snap, new_schema_ver, table_id],
+        )
+
+        self._record_change(new_snap, f"altered_table:{table_id}")
         con.commit()
 
     # ------------------------------------------------------------------

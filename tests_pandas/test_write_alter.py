@@ -659,3 +659,61 @@ class TestSortKeys:
         b_vals = table.column("b").to_pylist()
         pairs = list(zip(a_vals, b_vals))
         assert pairs == sorted(pairs), f"Parquet not sorted by (a, b): {pairs}"
+
+    def test_sort_keys_desc_direction(self, make_write_catalog):
+        """Sort keys with DESC direction."""
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [3, 1, 2], "b": ["c", "a", "b"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(
+            cat.metadata_path, "test", [("a", "DESC")]
+        )
+
+        df2 = pd.DataFrame({"a": [6, 4, 5], "b": ["f", "d", "e"]})
+        write_ducklake(df2, cat.metadata_path, "test", mode="append")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape[0] == 6
+
+    def test_sort_keys_mixed_directions(self, make_write_catalog):
+        """Sort keys with mixed ASC/DESC and null order."""
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1], "b": ["x"], "c": [1.0]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(
+            cat.metadata_path,
+            "test",
+            [("a", "DESC"), ("b", "ASC", "NULLS_FIRST")],
+        )
+
+        sort_exprs = cat.query_all(
+            "SELECT sort_key_index, expression, sort_direction, null_order "
+            "FROM ducklake_sort_expression ORDER BY sort_key_index"
+        )
+        assert len(sort_exprs) == 2
+        assert sort_exprs[0] == (0, "a", "DESC", "NULLS_LAST")
+        assert sort_exprs[1] == (1, "b", "ASC", "NULLS_FIRST")
+
+    def test_reset_sort_keys(self, make_write_catalog):
+        """Reset sort keys clears them."""
+        from ducklake_pandas import alter_ducklake_reset_sort_keys
+
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1], "b": ["x"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        sort_info = cat.query_all(
+            "SELECT end_snapshot FROM ducklake_sort_info"
+        )
+        assert sort_info[0][0] is None  # active
+
+        alter_ducklake_reset_sort_keys(cat.metadata_path, "test")
+
+        sort_info = cat.query_all(
+            "SELECT end_snapshot FROM ducklake_sort_info"
+        )
+        assert sort_info[0][0] is not None  # ended

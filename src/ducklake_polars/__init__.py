@@ -28,6 +28,7 @@ __all__ = [
     "alter_ducklake_set_type",
     "alter_ducklake_set_partitioned_by",
     "alter_ducklake_set_sort_keys",
+    "alter_ducklake_reset_sort_keys",
     "drop_ducklake_table",
     "create_ducklake_schema",
     "drop_ducklake_schema",
@@ -954,7 +955,7 @@ def alter_ducklake_set_partitioned_by(
 def alter_ducklake_set_sort_keys(
     path: str | Path,
     table: str,
-    columns: list[str],
+    sort_keys: list[str | tuple[str, str] | tuple[str, str, str]],
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
@@ -964,7 +965,7 @@ def alter_ducklake_set_sort_keys(
     """
     Set sort keys on a DuckLake table.
 
-    Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2, ...)``.
+    Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2 DESC, ...)``.
     Future writes will sort data by these columns before writing Parquet
     files, improving filter pushdown via Parquet row group statistics.
 
@@ -975,8 +976,12 @@ def alter_ducklake_set_sort_keys(
         Supports SQLite and PostgreSQL backends.
     table
         Name of the table.
-    columns
-        Column names to sort by (ascending order).
+    sort_keys
+        Sort key specifications. Each element can be:
+
+        - ``"col"`` — ascending, nulls last
+        - ``("col", "DESC")`` — descending, nulls last
+        - ``("col", "ASC", "NULLS_FIRST")`` — ascending, nulls first
     schema
         Schema name (default: "main").
     data_path
@@ -996,7 +1001,33 @@ def alter_ducklake_set_sort_keys(
         metadata_path, data_path_override=dp,
         author=author, commit_message=commit_message,
     ) as writer:
-        writer.set_sort_keys(table, columns, schema_name=schema)
+        writer.set_sort_keys(table, sort_keys, schema_name=schema)
+
+
+def alter_ducklake_reset_sort_keys(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Remove sort keys from a DuckLake table.
+
+    Equivalent to ``ALTER TABLE t RESET SORTED BY``.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.reset_sort_keys(table, schema_name=schema)
 
 
 def create_ducklake_view(

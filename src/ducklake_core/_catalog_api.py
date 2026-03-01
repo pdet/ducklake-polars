@@ -707,3 +707,60 @@ class DuckLakeCatalog:
         # Reorder: snapshot_id, change_type, then rest
         other_cols = [c for c in result.column_names if c not in ("snapshot_id", "change_type")]
         return result.select(["snapshot_id", "change_type"] + other_cols)
+
+    # ------------------------------------------------------------------
+    # Sort keys
+    # ------------------------------------------------------------------
+
+    def sort_keys(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+    ) -> pa.Table:
+        """Return the active sort keys for *table*.
+
+        Returns a table with columns:
+        - ``sort_key_index`` (int64) — position in the sort order
+        - ``expression`` (string) — column name
+        - ``sort_direction`` (string) — ``ASC`` or ``DESC``
+        - ``null_order`` (string) — ``NULLS_FIRST`` or ``NULLS_LAST``
+
+        Returns an empty table if no sort keys are set.
+        """
+        reader = self._reader()
+        snap = reader._resolve_snapshot(snapshot_version)
+        table_id = reader._resolve_table_id(table, schema, snap.snapshot_id)
+
+        from ducklake_core._writer import DuckLakeWriter
+        writer = DuckLakeWriter.__new__(DuckLakeWriter)
+        writer._backend = reader._backend
+
+        writer._ensure_sort_tables()
+
+        keys = writer._get_active_sort_keys(table_id, snap.snapshot_id)
+        if keys is None:
+            return pa.table({
+                "sort_key_index": pa.array([], type=pa.int64()),
+                "expression": pa.array([], type=pa.string()),
+                "sort_direction": pa.array([], type=pa.string()),
+                "null_order": pa.array([], type=pa.string()),
+            })
+
+        indices = []
+        expressions = []
+        directions = []
+        null_orders = []
+        for i, (col_name, direction, null_order) in enumerate(keys):
+            indices.append(i)
+            expressions.append(col_name)
+            directions.append(direction)
+            null_orders.append(null_order)
+
+        return pa.table({
+            "sort_key_index": pa.array(indices, type=pa.int64()),
+            "expression": pa.array(expressions, type=pa.string()),
+            "sort_direction": pa.array(directions, type=pa.string()),
+            "null_order": pa.array(null_orders, type=pa.string()),
+        })

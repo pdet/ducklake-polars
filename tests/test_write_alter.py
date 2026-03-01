@@ -756,8 +756,110 @@ class TestSortKeys:
         )
         assert len(sort_exprs) == 2
         assert sort_exprs[0][0] == 0  # sort_key_index
-        assert sort_exprs[0][2] == "asc"
+        assert sort_exprs[0][1] == "a"  # expression is column name
+        assert sort_exprs[0][2] == "ASC"
+        assert sort_exprs[0][3] == "NULLS_LAST"
         assert sort_exprs[1][0] == 1
+        assert sort_exprs[1][1] == "b"
+
+    def test_sort_keys_desc_direction(self, make_write_catalog):
+        """Setting sort keys with DESC direction."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [3, 1, 2], "b": ["c", "a", "b"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(
+            cat.metadata_path, "test", [("a", "DESC")]
+        )
+
+        # Write more data — should be sorted descending
+        df2 = pl.DataFrame({"a": [6, 4, 5], "b": ["f", "d", "e"]})
+        write_ducklake(df2, cat.metadata_path, "test", mode="append")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert result.shape[0] == 6
+
+    def test_sort_keys_mixed_directions(self, make_write_catalog):
+        """Setting sort keys with mixed ASC/DESC and null order."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1], "b": ["x"], "c": [1.0]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(
+            cat.metadata_path,
+            "test",
+            [("a", "DESC"), ("b", "ASC", "NULLS_FIRST")],
+        )
+
+        sort_exprs = cat.query_all(
+            "SELECT sort_key_index, expression, sort_direction, null_order "
+            "FROM ducklake_sort_expression ORDER BY sort_key_index"
+        )
+        assert len(sort_exprs) == 2
+        assert sort_exprs[0] == (0, "a", "DESC", "NULLS_LAST")
+        assert sort_exprs[1] == (1, "b", "ASC", "NULLS_FIRST")
+
+    def test_reset_sort_keys(self, make_write_catalog):
+        """Reset sort keys clears them."""
+        from ducklake_polars import alter_ducklake_reset_sort_keys
+
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1], "b": ["x"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        sort_info = cat.query_all(
+            "SELECT end_snapshot FROM ducklake_sort_info"
+        )
+        assert sort_info[0][0] is None  # active
+
+        alter_ducklake_reset_sort_keys(cat.metadata_path, "test")
+
+        sort_info = cat.query_all(
+            "SELECT end_snapshot FROM ducklake_sort_info"
+        )
+        assert sort_info[0][0] is not None  # ended
+
+    def test_reset_sort_keys_noop(self, make_write_catalog):
+        """Reset sort keys on table with no sort keys is a no-op."""
+        from ducklake_polars import alter_ducklake_reset_sort_keys
+
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        # Should not raise
+        alter_ducklake_reset_sort_keys(cat.metadata_path, "test")
+
+    def test_sort_keys_duckdb_roundtrip(self, make_write_catalog):
+        """Sort keys set by us are read correctly by DuckDB and vice versa."""
+        import duckdb
+
+        cat = make_write_catalog()
+        if "postgres" in cat.metadata_path:
+            pytest.skip("DuckDB interop only for SQLite")
+
+        df = pl.DataFrame({"a": [3, 1, 2], "b": ["c", "a", "b"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        # Set sort via our API
+        alter_ducklake_set_sort_keys(
+            cat.metadata_path, "test", [("a", "DESC"), "b"]
+        )
+
+        # Verify DuckDB reads them
+        con = duckdb.connect()
+        con.install_extension("ducklake")
+        con.load_extension("ducklake")
+        con.execute(
+            f"ATTACH 'ducklake:{cat.metadata_path}' AS ducklake "
+            f"(DATA_PATH '{cat.data_path}')"
+        )
+
+        result = con.execute("SELECT * FROM ducklake.test").fetchall()
+        assert len(result) == 3
+        con.close()
 
     def test_sort_keys_nonexistent_column_raises(self, make_write_catalog):
         """Setting sort keys with nonexistent column raises."""
