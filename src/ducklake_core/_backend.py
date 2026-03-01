@@ -117,7 +117,104 @@ class PostgreSQLBackend:
         return isinstance(exc, psycopg2.ProgrammingError) and getattr(exc, "pgcode", None) == "42P01"
 
 
-def create_backend(path: str) -> SQLiteBackend | PostgreSQLBackend:
+class _DuckDBConnectionWrapper:
+    """
+    Wraps a duckdb.DuckDBPyConnection to provide a sqlite3-compatible interface.
+
+    DuckDB connections use ``conn.execute(sql).fetchall()`` while sqlite3
+    uses ``cursor = conn.execute(sql); cursor.fetchall()``.  This wrapper
+    bridges the difference.
+    """
+
+    def __init__(self, con: Any) -> None:
+        self._con = con
+        self._last_result: Any = None
+
+    def execute(self, sql: str, params: Any = None) -> "_DuckDBConnectionWrapper":
+        if params is None:
+            self._last_result = self._con.execute(sql)
+        else:
+            self._last_result = self._con.execute(sql, list(params) if isinstance(params, tuple) else params)
+        return self
+
+    def fetchone(self) -> Any:
+        if self._last_result is None:
+            return None
+        row = self._last_result.fetchone()
+        return row
+
+    def fetchall(self) -> list:
+        if self._last_result is None:
+            return []
+        return self._last_result.fetchall()
+
+    @property
+    def description(self) -> Any:
+        if self._last_result is None:
+            return None
+        return self._last_result.description
+
+    @property
+    def lastrowid(self) -> int | None:
+        # DuckDB doesn't support lastrowid; use RETURNING or sequences
+        return None
+
+    def commit(self) -> None:
+        # DuckDB autocommits by default
+        pass
+
+    def rollback(self) -> None:
+        try:
+            self._con.execute("ROLLBACK")
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._con.close()
+
+
+@dataclass
+class DuckDBBackend:
+    """DuckDB metadata backend."""
+
+    path: str
+    placeholder: str = "?"
+
+    def _import_duckdb(self) -> Any:
+        """Import duckdb, raising a clear error if not installed."""
+        try:
+            import duckdb
+
+            return duckdb
+        except ImportError:
+            msg = (
+                "duckdb is required for DuckDB catalog backends. "
+                "Install it with: pip install duckdb"
+            )
+            raise ImportError(msg) from None
+
+    def connect(self) -> Any:
+        """Open a read-only DuckDB connection."""
+        duckdb = self._import_duckdb()
+        con = duckdb.connect(self.path, read_only=True)
+        return _DuckDBConnectionWrapper(con)
+
+    def connect_writable(self) -> Any:
+        """Open a read-write DuckDB connection."""
+        duckdb = self._import_duckdb()
+        con = duckdb.connect(self.path)
+        return _DuckDBConnectionWrapper(con)
+
+    def is_table_not_found(self, exc: BaseException) -> bool:
+        """Check if an exception indicates a missing table."""
+        try:
+            import duckdb
+        except ImportError:
+            return False
+        return isinstance(exc, duckdb.CatalogException) and "does not exist" in str(exc)
+
+
+def create_backend(path: str) -> SQLiteBackend | PostgreSQLBackend | DuckDBBackend:
     """
     Auto-detect the backend type from the connection string.
 
@@ -133,4 +230,9 @@ def create_backend(path: str) -> SQLiteBackend | PostgreSQLBackend:
         or "dbname=" in lower
     ):
         return PostgreSQLBackend(connection_string=path.strip())
+    if lower.endswith(".duckdb") or lower.startswith("duckdb:"):
+        clean = path.strip()
+        if clean.lower().startswith("duckdb:"):
+            clean = clean[7:]
+        return DuckDBBackend(path=clean)
     return SQLiteBackend(path=path)
