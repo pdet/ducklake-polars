@@ -3756,6 +3756,200 @@ class DuckLakeCatalogWriter:
     # VACUUM — delete orphaned Parquet files
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Tags (table and column metadata)
+    # ------------------------------------------------------------------
+
+    def set_table_tag(
+        self,
+        table_name: str,
+        key: str,
+        value: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Set a tag on a table. Overwrites existing tag with same key."""
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, next_file_id)
+
+        # End any existing tag with the same key
+        con.execute(
+            "UPDATE ducklake_tag SET end_snapshot = ? "
+            "WHERE object_id = ? AND key = ? AND end_snapshot IS NULL",
+            [new_snap, table_id, key],
+        )
+
+        # Insert the new tag
+        con.execute(
+            "INSERT INTO ducklake_tag "
+            "(object_id, begin_snapshot, end_snapshot, key, value) "
+            "VALUES (?, ?, NULL, ?, ?)",
+            [table_id, new_snap, key, value],
+        )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        self._record_change(
+            new_snap, f'set_table_tag:"{safe_schema}"."{safe_table}"."{key}"'
+        )
+        con.commit()
+
+    def delete_table_tag(
+        self,
+        table_name: str,
+        key: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Remove a tag from a table."""
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        # Check that the tag exists
+        row = con.execute(
+            "SELECT 1 FROM ducklake_tag "
+            "WHERE object_id = ? AND key = ? AND end_snapshot IS NULL",
+            [table_id, key],
+        ).fetchone()
+        if row is None:
+            msg = f"Tag '{key}' not found on table '{schema_name}.{table_name}'"
+            raise ValueError(msg)
+
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, next_file_id)
+
+        con.execute(
+            "UPDATE ducklake_tag SET end_snapshot = ? "
+            "WHERE object_id = ? AND key = ? AND end_snapshot IS NULL",
+            [new_snap, table_id, key],
+        )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        self._record_change(
+            new_snap, f'delete_table_tag:"{safe_schema}"."{safe_table}"."{key}"'
+        )
+        con.commit()
+
+    def set_column_tag(
+        self,
+        table_name: str,
+        column_name: str,
+        key: str,
+        value: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Set a tag on a column. Overwrites existing tag with same key."""
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        col_id = None
+        for cid, cname, _ctype, _parent in columns:
+            if cname == column_name:
+                col_id = cid
+                break
+        if col_id is None:
+            msg = f"Column '{column_name}' not found in table '{schema_name}.{table_name}'"
+            raise ValueError(msg)
+
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, next_file_id)
+
+        # End any existing tag with the same key
+        con.execute(
+            "UPDATE ducklake_column_tag SET end_snapshot = ? "
+            "WHERE table_id = ? AND column_id = ? AND key = ? AND end_snapshot IS NULL",
+            [new_snap, table_id, col_id, key],
+        )
+
+        # Insert the new tag
+        con.execute(
+            "INSERT INTO ducklake_column_tag "
+            "(table_id, column_id, begin_snapshot, end_snapshot, key, value) "
+            "VALUES (?, ?, ?, NULL, ?, ?)",
+            [table_id, col_id, new_snap, key, value],
+        )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        safe_col = column_name.replace('"', '""')
+        self._record_change(
+            new_snap,
+            f'set_column_tag:"{safe_schema}"."{safe_table}"."{safe_col}"."{key}"',
+        )
+        con.commit()
+
+    def delete_column_tag(
+        self,
+        table_name: str,
+        column_name: str,
+        key: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Remove a tag from a column."""
+        con = self._connect()
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        col_id = None
+        for cid, cname, _ctype, _parent in columns:
+            if cname == column_name:
+                col_id = cid
+                break
+        if col_id is None:
+            msg = f"Column '{column_name}' not found in table '{schema_name}.{table_name}'"
+            raise ValueError(msg)
+
+        # Check that the tag exists
+        row = con.execute(
+            "SELECT 1 FROM ducklake_column_tag "
+            "WHERE table_id = ? AND column_id = ? AND key = ? AND end_snapshot IS NULL",
+            [table_id, col_id, key],
+        ).fetchone()
+        if row is None:
+            msg = f"Tag '{key}' not found on column '{column_name}' of table '{schema_name}.{table_name}'"
+            raise ValueError(msg)
+
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, next_file_id)
+
+        con.execute(
+            "UPDATE ducklake_column_tag SET end_snapshot = ? "
+            "WHERE table_id = ? AND column_id = ? AND key = ? AND end_snapshot IS NULL",
+            [new_snap, table_id, col_id, key],
+        )
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_table = table_name.replace('"', '""')
+        safe_col = column_name.replace('"', '""')
+        self._record_change(
+            new_snap,
+            f'delete_column_tag:"{safe_schema}"."{safe_table}"."{safe_col}"."{key}"',
+        )
+        con.commit()
+
     def vacuum(self) -> int:
         """Delete orphaned Parquet files not referenced by any catalog entry."""
         con = self._connect()

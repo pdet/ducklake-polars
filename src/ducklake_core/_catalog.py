@@ -813,6 +813,55 @@ class DuckLakeCatalogReader:
             for r in rows
         ]
 
+    def get_table_tags(self, table_id: int, snapshot_id: int) -> dict[str, str]:
+        """Get all active tags for a table at a specific snapshot.
+
+        Returns a dict mapping tag key to tag value.
+        """
+        con = self._connect()
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT key, value
+                FROM ducklake_tag
+                WHERE object_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                """),
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return {}
+            raise
+        return {r[0]: r[1] for r in rows}
+
+    def get_column_tags(
+        self, table_id: int, column_id: int, snapshot_id: int
+    ) -> dict[str, str]:
+        """Get all active tags for a column at a specific snapshot.
+
+        Returns a dict mapping tag key to tag value.
+        """
+        con = self._connect()
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT key, value
+                FROM ducklake_column_tag
+                WHERE table_id = ?
+                  AND column_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                """),
+                [table_id, column_id, snapshot_id, snapshot_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return {}
+            raise
+        return {r[0]: r[1] for r in rows}
+
     def read_inlined_data(
         self,
         table_id: int,

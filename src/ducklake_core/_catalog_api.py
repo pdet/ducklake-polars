@@ -386,6 +386,81 @@ class DuckLakeCatalog:
         )
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def table_tags(self, table: str, *, schema: str = "main") -> pa.Table:
+        """
+        Get tags for a table.
+
+        Returns a table with columns:
+        - ``key`` (string)
+        - ``value`` (string)
+        """
+        tag_schema = pa.schema([
+            pa.field("key", pa.string()),
+            pa.field("value", pa.string()),
+        ])
+
+        with self._reader() as reader:
+            snap = reader.get_current_snapshot()
+            table_info = reader.get_table(table, schema, snap.snapshot_id)
+            tags = reader.get_table_tags(table_info.table_id, snap.snapshot_id)
+
+        if not tags:
+            return tag_schema.empty_table()
+
+        return pa.table(
+            {
+                "key": pa.array(list(tags.keys()), type=pa.string()),
+                "value": pa.array(list(tags.values()), type=pa.string()),
+            },
+            schema=tag_schema,
+        )
+
+    def column_tags(
+        self, table: str, column: str, *, schema: str = "main"
+    ) -> pa.Table:
+        """
+        Get tags for a column.
+
+        Returns a table with columns:
+        - ``key`` (string)
+        - ``value`` (string)
+        """
+        tag_schema = pa.schema([
+            pa.field("key", pa.string()),
+            pa.field("value", pa.string()),
+        ])
+
+        with self._reader() as reader:
+            snap = reader.get_current_snapshot()
+            table_info = reader.get_table(table, schema, snap.snapshot_id)
+            columns = reader.get_columns(table_info.table_id, snap.snapshot_id)
+            col_info = None
+            for c in columns:
+                if c.column_name == column:
+                    col_info = c
+                    break
+            if col_info is None:
+                msg = f"Column '{column}' not found in table '{schema}.{table}'"
+                raise ValueError(msg)
+            tags = reader.get_column_tags(
+                table_info.table_id, col_info.column_id, snap.snapshot_id
+            )
+
+        if not tags:
+            return tag_schema.empty_table()
+
+        return pa.table(
+            {
+                "key": pa.array(list(tags.keys()), type=pa.string()),
+                "value": pa.array(list(tags.values()), type=pa.string()),
+            },
+            schema=tag_schema,
+        )
+
+    # ------------------------------------------------------------------
     # Change data feed
     # ------------------------------------------------------------------
 

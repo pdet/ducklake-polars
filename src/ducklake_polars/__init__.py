@@ -36,6 +36,10 @@ __all__ = [
     "vacuum_ducklake",
     "create_ducklake_view",
     "drop_ducklake_view",
+    "set_ducklake_table_tag",
+    "set_ducklake_column_tag",
+    "delete_ducklake_table_tag",
+    "delete_ducklake_column_tag",
     "DuckLakeCatalog",
 ]
 
@@ -1165,3 +1169,175 @@ def vacuum_ducklake(
 
     with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
         return writer.vacuum()
+
+
+def set_ducklake_table_tag(
+    path: str | Path,
+    table: str,
+    key: str,
+    value: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Set a tag on a DuckLake table.
+
+    Tags are key-value metadata pairs. Setting a tag with an existing key
+    overwrites the previous value. The ``comment`` key is interoperable
+    with DuckDB's ``COMMENT ON TABLE`` statement.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+    table
+        Name of the table.
+    key
+        Tag key (e.g., ``"comment"``).
+    value
+        Tag value.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.set_table_tag(table, key, value, schema_name=schema)
+
+
+def set_ducklake_column_tag(
+    path: str | Path,
+    table: str,
+    column: str,
+    key: str,
+    value: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Set a tag on a column in a DuckLake table.
+
+    Tags are key-value metadata pairs. Setting a tag with an existing key
+    overwrites the previous value. The ``comment`` key is interoperable
+    with DuckDB's ``COMMENT ON COLUMN`` statement.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+    table
+        Name of the table.
+    column
+        Name of the column.
+    key
+        Tag key (e.g., ``"comment"``).
+    value
+        Tag value.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.set_column_tag(table, column, key, value, schema_name=schema)
+
+
+def delete_ducklake_table_tag(
+    path: str | Path,
+    table: str,
+    key: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Remove a tag from a DuckLake table.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+    table
+        Name of the table.
+    key
+        Tag key to remove.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.delete_table_tag(table, key, schema_name=schema)
+
+
+def delete_ducklake_column_tag(
+    path: str | Path,
+    table: str,
+    column: str,
+    key: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Remove a tag from a column in a DuckLake table.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+    table
+        Name of the table.
+    column
+        Name of the column.
+    key
+        Tag key to remove.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.delete_column_tag(table, column, key, schema_name=schema)

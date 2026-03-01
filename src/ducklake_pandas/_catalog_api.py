@@ -155,6 +155,32 @@ class DuckLakeCatalog(_CoreCatalog):
         return super().settings().to_pandas()
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def table_tags(self, table: str, *, schema: str = "main") -> pd.DataFrame:
+        """
+        Get tags for a table.
+
+        Returns a DataFrame with columns:
+        - ``key`` (object/string)
+        - ``value`` (object/string)
+        """
+        return super().table_tags(table, schema=schema).to_pandas()
+
+    def column_tags(
+        self, table: str, column: str, *, schema: str = "main"
+    ) -> pd.DataFrame:
+        """
+        Get tags for a column.
+
+        Returns a DataFrame with columns:
+        - ``key`` (object/string)
+        - ``value`` (object/string)
+        """
+        return super().column_tags(table, column, schema=schema).to_pandas()
+
+    # ------------------------------------------------------------------
     # Change data feed
     # ------------------------------------------------------------------
 

@@ -155,6 +155,32 @@ class DuckLakeCatalog(_CoreCatalog):
         return pl.from_arrow(super().settings())
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    def table_tags(self, table: str, *, schema: str = "main") -> pl.DataFrame:
+        """
+        Get tags for a table.
+
+        Returns a DataFrame with columns:
+        - ``key`` (String)
+        - ``value`` (String)
+        """
+        return pl.from_arrow(super().table_tags(table, schema=schema))
+
+    def column_tags(
+        self, table: str, column: str, *, schema: str = "main"
+    ) -> pl.DataFrame:
+        """
+        Get tags for a column.
+
+        Returns a DataFrame with columns:
+        - ``key`` (String)
+        - ``value`` (String)
+        """
+        return pl.from_arrow(super().column_tags(table, column, schema=schema))
+
+    # ------------------------------------------------------------------
     # Change data feed
     # ------------------------------------------------------------------
 
