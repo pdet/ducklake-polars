@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import read_ducklake
 
 
@@ -84,7 +85,7 @@ class TestScalarTypes:
 
         result = read_ducklake(cat.metadata_path, "test")
         assert True  # schema check skipped for pandas
-        assert result["a"].tolist() == [True, False, None]
+        assert_list_equal(result["a"].tolist(), [True, False, None])
 
     def test_varchar(self, ducklake_catalog):
         cat = ducklake_catalog

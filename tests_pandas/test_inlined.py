@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import read_ducklake
 
 
@@ -106,7 +107,7 @@ class TestInlinedDataTypes:
         result = read_ducklake(cat.metadata_path, "test")
         result = result.sort_values("a").reset_index(drop=True)
         assert result.shape == (3, 2)
-        assert result["b"].tolist() == [True, False, None]
+        assert_list_equal(result["b"].tolist(), [True, False, None])
 
     def test_inlined_decimal(self, ducklake_catalog_inline):
         cat = ducklake_catalog_inline

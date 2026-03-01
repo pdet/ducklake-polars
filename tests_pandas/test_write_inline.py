@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from pandas.testing import assert_frame_equal
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import (
     delete_ducklake,
     read_ducklake,
@@ -539,7 +540,7 @@ class TestInlinedNulls:
         assert a_list[0] == 1.0
         assert a_list[1] == 3.0
         assert math.isnan(a_list[2])
-        assert result["b"].tolist() == ["hello", "world", None]
+        assert_list_equal(result["b"].tolist(), ["hello", "world", None])
 
 
 # ---------------------------------------------------------------------------

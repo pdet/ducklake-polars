@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import read_ducklake
 
 
@@ -27,7 +28,7 @@ class TestAddColumn:
         assert True  # schema check skipped for pandas
         # Old rows should have NULL for the new column
         result = result.sort_values("a").reset_index(drop=True)
-        assert result[result["a"] <= 2]["b"].tolist() == [None, None]
+        assert_list_equal(result[result["a"] <= 2]["b"].tolist(), [None, None])
         # New row should have the value
         assert result[result["a"] == 3]["b"].tolist() == ["hello"]
 
@@ -47,7 +48,7 @@ class TestAddColumn:
         assert True  # schema check skipped for pandas
         result = result.sort_values("a").reset_index(drop=True)
         assert result["a"].tolist() == [1, 2]
-        assert result["b"].tolist() == [None, "hello"]
+        assert_list_equal(result["b"].tolist(), [None, "hello"])
         c_vals = result["c"].tolist()
         assert pd.isna(c_vals[0])
         assert c_vals[1] == 3.14
@@ -350,7 +351,7 @@ class TestDefaultValues:
         assert result["a"].tolist() == [1, 2, 3]
         # Old Parquet files don't contain the new column, so old rows get NULL
         # (DuckLake does not backfill defaults into existing Parquet files)
-        assert result["b"].tolist() == [None, None, "world"]
+        assert_list_equal(result["b"].tolist(), [None, None, "world"])
 
     def test_add_column_default_vs_null(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -372,7 +373,7 @@ class TestDefaultValues:
         assert result["a"].tolist() == [1, 2]
         # Old row: both b and c are NULL (DuckLake does not backfill defaults
         # into existing Parquet files; missing_columns="insert" fills with NULL)
-        assert result["b"].tolist() == [None, "val"]
+        assert_list_equal(result["b"].tolist(), [None, "val"])
         c_vals = result["c"].tolist()
         assert pd.isna(c_vals[0])
         assert c_vals[1] == 5
@@ -402,7 +403,7 @@ class TestMixedAlter:
         assert result["a"].tolist() == [1, 2, 3]
         assert result["c"].tolist() == ["first", "second", "third"]
         # Old rows (before b was re-added) should have NULL for b
-        assert result["b"].tolist() == [None, None, "new_b"]
+        assert_list_equal(result["b"].tolist(), [None, None, "new_b"])
 
     def test_rename_and_drop(self, ducklake_catalog):
         """Rename one column and drop another, then insert and read."""

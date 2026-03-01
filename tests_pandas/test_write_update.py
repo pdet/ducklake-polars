@@ -6,6 +6,7 @@ import duckdb
 import pandas as pd
 import numpy as np
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import (
     read_ducklake,
     update_ducklake,
@@ -361,7 +362,7 @@ class TestUpdateEdgeCases:
         )
 
         result = read_ducklake(cat.metadata_path, "test").sort_values("a").reset_index(drop=True)
-        assert result["b"].tolist() == ["x", None, "z"]
+        assert_list_equal(result["b"].tolist(), ["x", None, "z"])
 
     def test_update_then_delete(self, make_write_catalog):
         """Update followed by delete."""

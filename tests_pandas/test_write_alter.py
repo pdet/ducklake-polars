@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from pandas.testing import assert_frame_equal
 
+from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import (
     alter_ducklake_add_column,
     alter_ducklake_drop_column,
@@ -71,7 +72,7 @@ class TestAddColumn:
 
         result = read_ducklake(cat.metadata_path, "test").sort_values("a").reset_index(drop=True)
         assert result["a"].tolist() == [1, 2, 3]
-        assert result["b"].tolist() == [None, None, "hello"]
+        assert_list_equal(result["b"].tolist(), [None, None, "hello"])
 
     def test_add_column_metadata_correct(self, make_write_catalog):
         """Verify metadata: schema_version, column row, schema_versions."""
@@ -161,7 +162,7 @@ class TestAddColumn:
 
         pdf = cat.read_with_duckdb("test").sort_values("a").reset_index(drop=True)
         assert pdf["a"].tolist() == [1, 2, 3]
-        assert pdf["b"].tolist() == [None, None, "new"]
+        assert_list_equal(pdf["b"].tolist(), [None, None, "new"])
 
     def test_duckdb_add_column_pandas_reads(self, make_write_catalog):
         """DuckDB adds a column, pandas reads correctly."""
@@ -187,7 +188,7 @@ class TestAddColumn:
 
         result = read_ducklake(cat.metadata_path, "test").sort_values("a").reset_index(drop=True)
         assert result["a"].tolist() == [1, 2, 3]
-        assert result["b"].tolist() == [None, None, "hello"]
+        assert_list_equal(result["b"].tolist(), [None, None, "hello"])
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +427,7 @@ class TestAlterAndUpdate:
 
         result = read_ducklake(cat.metadata_path, "test").sort_values("a").reset_index(drop=True)
         assert result["a"].tolist() == [1, 2, 3, 4, 5]
-        assert result["b"].tolist() == [None, None, None, "updated", "updated"]
+        assert_list_equal(result["b"].tolist(), [None, None, None, "updated", "updated"])
 
     def test_drop_column_then_update(self, make_write_catalog):
         """Drop column, then update remaining columns."""
