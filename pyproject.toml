@@ -29,6 +29,7 @@ classifiers = [
 ]
 dependencies = [
     "polars>=1.0",
+    "pyarrow>=10.0",
 ]
 
 [project.urls]
@@ -43,10 +44,11 @@ dev = [
     "pytest>=7.0",
     "pytest-xdist",
     "duckdb>=1.2",
+    "pandas>=1.5",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ducklake_polars", "src/ducklake_pandas"]
+packages = ["src/ducklake_core", "src/ducklake_polars", "src/ducklake_pandas"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "tests_pandas"]
