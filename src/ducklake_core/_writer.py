@@ -3497,29 +3497,23 @@ class DuckLakeCatalogWriter:
     def _ensure_sort_tables(self) -> None:
         """Create ducklake_sort_info and ducklake_sort_expression if they don't exist."""
         con = self._connect()
-        try:
-            con.execute("SELECT 1 FROM ducklake_sort_info LIMIT 1")
-        except Exception:
-            con.execute(
-                "CREATE TABLE ducklake_sort_info ("
-                "sort_id BIGINT, "
-                "table_id BIGINT, "
-                "begin_snapshot BIGINT, "
-                "end_snapshot BIGINT)"
-            )
-        try:
-            con.execute("SELECT 1 FROM ducklake_sort_expression LIMIT 1")
-        except Exception:
-            con.execute(
-                "CREATE TABLE ducklake_sort_expression ("
-                "sort_id BIGINT, "
-                "table_id BIGINT, "
-                "sort_key_index BIGINT, "
-                "expression VARCHAR, "
-                "dialect VARCHAR, "
-                "sort_direction VARCHAR, "
-                "null_order VARCHAR)"
-            )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS ducklake_sort_info ("
+            "sort_id BIGINT, "
+            "table_id BIGINT, "
+            "begin_snapshot BIGINT, "
+            "end_snapshot BIGINT)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS ducklake_sort_expression ("
+            "sort_id BIGINT, "
+            "table_id BIGINT, "
+            "sort_key_index BIGINT, "
+            "expression VARCHAR, "
+            "dialect VARCHAR, "
+            "sort_direction VARCHAR, "
+            "null_order VARCHAR)"
+        )
 
     def _get_active_sort_keys(
         self, table_id: int, snapshot_id: int
@@ -3584,6 +3578,7 @@ class DuckLakeCatalogWriter:
         self, df: pa.Table, table_id: int, snapshot_id: int
     ) -> pa.Table:
         """Sort *df* by the table's sort keys if any are defined."""
+        self._ensure_sort_tables()
         sort_keys = self._get_active_sort_keys(table_id, snapshot_id)
         if sort_keys:
             return self._sort_table_by_keys(df, sort_keys)
