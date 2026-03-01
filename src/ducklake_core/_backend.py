@@ -49,10 +49,18 @@ class _PsycopgConnectionWrapper:
         self._cur = con.cursor()
 
     def execute(self, sql: str, params: Any = None) -> Any:
-        if params is None:
-            self._cur.execute(sql)
-        else:
-            self._cur.execute(sql, params)
+        try:
+            if params is None:
+                self._cur.execute(sql)
+            else:
+                self._cur.execute(sql, params)
+        except Exception:
+            # Auto-rollback on postgres to prevent InFailedSqlTransaction cascade
+            try:
+                self._con.rollback()
+            except Exception:
+                pass
+            raise
         return self._cur
 
     def commit(self) -> None:
