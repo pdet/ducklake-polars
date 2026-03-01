@@ -37,6 +37,22 @@ def _uuid7() -> str:
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
 
+def _decode_dictionary_columns(table: pa.Table) -> pa.Table:
+    """Cast any dictionary-encoded columns to their value types.
+
+    Polars ``Categorical`` / ``Enum`` columns arrive as dictionary-encoded
+    Arrow arrays. DuckLake stores these as plain ``varchar``, so we decode
+    them before computing statistics or writing Parquet to avoid type
+    mismatches on read.
+    """
+    for i, field in enumerate(table.schema):
+        if pa.types.is_dictionary(field.type):
+            col = table.column(i)
+            decoded = col.cast(field.type.value_type)
+            table = table.set_column(i, field.with_type(decoded.type), decoded)
+    return table
+
+
 def _read_parquet_footer_size(path: str) -> int:
     """Read the Parquet footer size from a file."""
     try:
@@ -876,6 +892,8 @@ class DuckLakeCatalogWriter:
 
         Returns the new snapshot ID.
         """
+        df = _decode_dictionary_columns(df)
+
         con = self._connect()
         snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
 
@@ -1076,6 +1094,10 @@ class DuckLakeCatalogWriter:
             if col_name not in col_names_set:
                 continue
             col_array = df.column(col_name)
+            # Dictionary-encoded arrays (e.g. from Polars Categorical/Enum)
+            # must be decoded before computing min/max statistics.
+            if pa.types.is_dictionary(col_array.type):
+                col_array = col_array.cast(col_array.type.value_type)
             null_count = col_array.null_count
             value_count = n
 
@@ -1326,6 +1348,8 @@ class DuckLakeCatalogWriter:
 
         Returns the new snapshot ID.
         """
+        df = _decode_dictionary_columns(df)
+
         if len(df) == 0:
             msg = "Cannot insert empty DataFrame"
             raise ValueError(msg)
@@ -1367,6 +1391,9 @@ class DuckLakeCatalogWriter:
             )
 
         os.makedirs(base, exist_ok=True)
+
+        # Sort by sort keys if defined
+        df = self._maybe_sort(df, table_id, snap_id)
 
         file_name = f"ducklake-{_uuid7()}.parquet"
         file_path = os.path.join(base, file_name)
@@ -1478,10 +1505,17 @@ class DuckLakeCatalogWriter:
             list[tuple[int, str, int, int | None, str | None, str | None, int | None]]
         ] = []
 
+        # Get sort keys for sorting each partition group
+        sort_keys = self._get_active_sort_keys(table_id, snap_id)
+
         current_file_id = next_file_id
         current_row_id = row_id_start
 
         for group_key, group_df in group_list:
+            # Sort partition group by sort keys if defined
+            if sort_keys:
+                group_df = self._sort_table_by_keys(group_df, sort_keys)
+
             partition_values = [str(v) for v in group_key]
             hive_subdir = self._build_hive_path(part_col_names, partition_values)
             partition_dir = os.path.join(base_dir, hive_subdir)
@@ -1639,6 +1673,9 @@ class DuckLakeCatalogWriter:
             return new_snap
 
         if record_count > 0:
+            # Sort by sort keys if defined
+            df = self._maybe_sort(df, table_id, snap_id)
+
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = os.path.join(base, file_name)
             pq.write_table(df, file_path)
@@ -1737,12 +1774,19 @@ class DuckLakeCatalogWriter:
 
         mapping_id = self._register_name_mapping(table_id, columns)
 
+        # Get sort keys for sorting each partition group
+        sort_keys = self._get_active_sort_keys(table_id, snap_id)
+
         total_file_size = 0
         total_records = 0
         current_file_id = next_file_id
         current_row_id = 0
 
         for group_key, group_df in group_list:
+            # Sort partition group by sort keys if defined
+            if sort_keys:
+                group_df = self._sort_table_by_keys(group_df, sort_keys)
+
             partition_values = [str(v) for v in group_key]
             hive_subdir = self._build_hive_path(part_col_names, partition_values)
             partition_dir = os.path.join(base_dir, hive_subdir)
@@ -2280,12 +2324,19 @@ class DuckLakeCatalogWriter:
 
         mapping_id = self._register_name_mapping(table_id, columns)
 
+        # Get sort keys for sorting updated data
+        update_sort_keys = self._get_active_sort_keys(table_id, snap_id)
+
         if part_id is not None:
             total_file_size = 0
             current_data_file_id = first_data_file_id
             current_row_id = row_id_start_new
 
             for group_key, group_df in group_list:
+                # Sort partition group by sort keys if defined
+                if update_sort_keys:
+                    group_df = self._sort_table_by_keys(group_df, update_sort_keys)
+
                 partition_values = [str(v) for v in group_key]
                 hive_subdir = self._build_hive_path(part_col_names, partition_values)
                 partition_dir = os.path.join(base, hive_subdir)
@@ -2318,6 +2369,10 @@ class DuckLakeCatalogWriter:
 
             update_file_size = total_file_size
         else:
+            # Sort by sort keys if defined
+            if update_sort_keys:
+                updated_df = self._sort_table_by_keys(updated_df, update_sort_keys)
+
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = os.path.join(base, file_name)
             pq.write_table(updated_df, file_path)
@@ -2664,12 +2719,19 @@ class DuckLakeCatalogWriter:
         row_id_start = existing_stats[1] if existing_stats else 0
         mapping_id = self._register_name_mapping(table_id, columns)
 
+        # Get sort keys for sorting merged data
+        merge_sort_keys = self._get_active_sort_keys(table_id, snap_id)
+
         if part_id is not None and group_list:
             total_file_size = 0
             current_data_file_id = first_data_file_id
             current_row_id = row_id_start
 
             for gk, gdf in group_list:
+                # Sort partition group by sort keys if defined
+                if merge_sort_keys:
+                    gdf = self._sort_table_by_keys(gdf, merge_sort_keys)
+
                 partition_values = [str(v) for v in gk]
                 hive_subdir = self._build_hive_path(
                     part_col_names, partition_values,
@@ -2705,6 +2767,10 @@ class DuckLakeCatalogWriter:
 
             self._update_table_stats(table_id, len(insert_df), total_file_size)
         elif len(insert_df) > 0:
+            # Sort by sort keys if defined
+            if merge_sort_keys:
+                insert_df = self._sort_table_by_keys(insert_df, merge_sort_keys)
+
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = os.path.join(base, file_name)
             pq.write_table(insert_df, file_path)
@@ -3412,6 +3478,178 @@ class DuckLakeCatalogWriter:
                 "(partition_id, table_id, partition_key_index, column_id, transform) "
                 "VALUES (?, ?, ?, ?, 'identity')",
                 [partition_id, table_id, key_index, col_id],
+            )
+
+        con.execute(
+            "INSERT INTO ducklake_schema_versions (begin_snapshot, schema_version) "
+            "VALUES (?, ?)",
+            [new_snap, new_schema_ver],
+        )
+
+        self._record_change(new_snap, f"altered_table:{table_id}")
+
+        con.commit()
+
+    # ------------------------------------------------------------------
+    # ALTER TABLE: SET SORT KEYS
+    # ------------------------------------------------------------------
+
+    def _ensure_sort_tables(self) -> None:
+        """Create ducklake_sort_info and ducklake_sort_expression if they don't exist."""
+        con = self._connect()
+        try:
+            con.execute("SELECT 1 FROM ducklake_sort_info LIMIT 1")
+        except Exception:
+            con.execute(
+                "CREATE TABLE ducklake_sort_info ("
+                "sort_id BIGINT, "
+                "table_id BIGINT, "
+                "begin_snapshot BIGINT, "
+                "end_snapshot BIGINT)"
+            )
+        try:
+            con.execute("SELECT 1 FROM ducklake_sort_expression LIMIT 1")
+        except Exception:
+            con.execute(
+                "CREATE TABLE ducklake_sort_expression ("
+                "sort_id BIGINT, "
+                "table_id BIGINT, "
+                "sort_key_index BIGINT, "
+                "expression VARCHAR, "
+                "dialect VARCHAR, "
+                "sort_direction VARCHAR, "
+                "null_order VARCHAR)"
+            )
+
+    def _get_active_sort_keys(
+        self, table_id: int, snapshot_id: int
+    ) -> list[tuple[str, str]] | None:
+        """Return active sort keys as [(column_name, direction)] or None.
+
+        Returns None if no sort keys are defined for the table.
+        """
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT sort_id FROM ducklake_sort_info "
+                "WHERE table_id = ? AND begin_snapshot <= ? "
+                "AND (end_snapshot IS NULL OR end_snapshot > ?)",
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+
+        sort_id = row[0]
+
+        # Get column names from sort expressions
+        columns = self._get_columns_for_table(table_id, snapshot_id)
+        col_id_to_name: dict[str, str] = {str(c[0]): c[1] for c in columns}
+
+        try:
+            rows = con.execute(
+                "SELECT sort_key_index, expression, sort_direction "
+                "FROM ducklake_sort_expression "
+                "WHERE sort_id = ? AND table_id = ? "
+                "ORDER BY sort_key_index",
+                [sort_id, table_id],
+            ).fetchall()
+        except Exception:
+            return None
+
+        result = []
+        for _idx, expr, direction in rows:
+            col_name = col_id_to_name.get(expr)
+            if col_name is None:
+                continue
+            result.append((col_name, direction or "asc"))
+
+        return result if result else None
+
+    def _sort_table_by_keys(
+        self, df: pa.Table, sort_keys: list[tuple[str, str]]
+    ) -> pa.Table:
+        """Sort an Arrow table by the given sort keys."""
+        sort_cols = []
+        for col_name, direction in sort_keys:
+            if col_name in df.schema.names:
+                sort_cols.append((col_name, "ascending" if direction == "asc" else "descending"))
+        if not sort_cols:
+            return df
+        indices = pc.sort_indices(df, sort_keys=sort_cols)
+        return df.take(indices)
+
+    def _maybe_sort(
+        self, df: pa.Table, table_id: int, snapshot_id: int
+    ) -> pa.Table:
+        """Sort *df* by the table's sort keys if any are defined."""
+        sort_keys = self._get_active_sort_keys(table_id, snapshot_id)
+        if sort_keys:
+            return self._sort_table_by_keys(df, sort_keys)
+        return df
+
+    def set_sort_keys(
+        self,
+        table_name: str,
+        column_names: list[str],
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Set sort keys on an existing table.
+
+        Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2, ...)``.
+        Future writes will sort data by these columns before writing
+        Parquet files, improving filter pushdown via row group statistics.
+        """
+        con = self._connect()
+        self._ensure_sort_tables()
+
+        snap_id, schema_ver, next_cat_id, next_file_id = self._get_latest_snapshot()
+
+        table_id = self._table_exists(table_name, schema_name, snap_id)
+        if table_id is None:
+            msg = f"Table '{schema_name}.{table_name}' not found"
+            raise ValueError(msg)
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        col_name_to_id: dict[str, int] = {c[1]: c[0] for c in columns}
+        for name in column_names:
+            if name not in col_name_to_id:
+                msg = f"Column '{name}' not found in '{schema_name}.{table_name}'"
+                raise ValueError(msg)
+
+        sort_id = next_cat_id
+        new_next_cat_id = next_cat_id + 1
+        new_schema_ver = schema_ver + 1
+
+        new_snap = self._create_snapshot(new_schema_ver, new_next_cat_id, next_file_id)
+
+        # End any existing sort info for this table
+        try:
+            con.execute(
+                "UPDATE ducklake_sort_info SET end_snapshot = ? "
+                "WHERE table_id = ? AND end_snapshot IS NULL",
+                [new_snap, table_id],
+            )
+        except Exception:
+            pass
+
+        con.execute(
+            "INSERT INTO ducklake_sort_info "
+            "(sort_id, table_id, begin_snapshot, end_snapshot) "
+            "VALUES (?, ?, ?, NULL)",
+            [sort_id, table_id, new_snap],
+        )
+
+        for key_index, col_name in enumerate(column_names):
+            col_id = col_name_to_id[col_name]
+            con.execute(
+                "INSERT INTO ducklake_sort_expression "
+                "(sort_id, table_id, sort_key_index, expression, dialect, "
+                "sort_direction, null_order) "
+                "VALUES (?, ?, ?, ?, 'duckdb', 'asc', 'nulls_last')",
+                [sort_id, table_id, key_index, str(col_id)],
             )
 
         con.execute(

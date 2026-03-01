@@ -135,6 +135,16 @@ class FilePartitionValue:
     partition_value: str | None
 
 
+@dataclass
+class SortKeyDef:
+    """A sort key expression for a table."""
+
+    sort_key_index: int
+    column_name: str
+    sort_direction: str  # "asc" or "desc"
+    null_order: str  # "nulls_first" or "nulls_last"
+
+
 class DuckLakeCatalogReader:
     """
     Reads metadata from a DuckLake catalog database.
@@ -569,6 +579,66 @@ class DuckLakeCatalogReader:
                 data_file_id=r[0],
                 partition_key_index=r[1],
                 partition_value=r[2],
+            )
+            for r in rows
+        ]
+
+    def get_sort_keys(self, table_id: int, snapshot_id: int) -> list[SortKeyDef]:
+        """Get the active sort keys for a table at a given snapshot.
+
+        Returns an ordered list of :class:`SortKeyDef` entries, or an
+        empty list when no sort keys are defined.
+        """
+        con = self._connect()
+        try:
+            # First get the active sort_id
+            row = con.execute(
+                self._sql("""
+                SELECT sort_id
+                FROM ducklake_sort_info
+                WHERE table_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                """),
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchone()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+        if row is None:
+            return []
+
+        sort_id = row[0]
+
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT se.sort_key_index, c.column_name,
+                       se.sort_direction, se.null_order
+                FROM ducklake_sort_expression se
+                JOIN ducklake_column c
+                  ON se.table_id = c.table_id
+                  AND se.expression = CAST(c.column_id AS VARCHAR)
+                WHERE se.sort_id = ?
+                  AND se.table_id = ?
+                  AND ? >= c.begin_snapshot
+                  AND (? < c.end_snapshot OR c.end_snapshot IS NULL)
+                ORDER BY se.sort_key_index
+                """),
+                [sort_id, table_id, snapshot_id, snapshot_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+
+        return [
+            SortKeyDef(
+                sort_key_index=r[0],
+                column_name=r[1],
+                sort_direction=r[2] or "asc",
+                null_order=r[3] or "nulls_last",
             )
             for r in rows
         ]

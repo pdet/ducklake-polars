@@ -1,15 +1,17 @@
-"""Tests for ducklake-polars ALTER TABLE support (ADD/DROP COLUMN)."""
+"""Tests for ducklake-polars ALTER TABLE support (ADD/DROP COLUMN, SORT KEYS)."""
 
 from __future__ import annotations
 
 import duckdb
 import polars as pl
+import pyarrow.parquet as pq
 import pytest
 from polars.testing import assert_frame_equal
 
 from ducklake_polars import (
     alter_ducklake_add_column,
     alter_ducklake_drop_column,
+    alter_ducklake_set_sort_keys,
     alter_ducklake_set_type,
     read_ducklake,
     scan_ducklake,
@@ -588,3 +590,187 @@ class TestSetType:
         result = cat.read_with_duckdb("test")
         assert sorted(result["a"].to_list()) == [1, 2]
         assert sorted(result["b"].to_list()) == ["x", "y"]
+
+
+# ---------------------------------------------------------------------------
+# SORT KEYS: optimized Parquet writes
+# ---------------------------------------------------------------------------
+
+
+class TestSortKeys:
+    """Test ALTER TABLE SET SORT KEYS."""
+
+    def test_set_sort_keys_basic(self, make_write_catalog):
+        """Set sort keys, write data, verify Parquet file is sorted."""
+        import os
+        import glob
+
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1, 2, 3]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        # Insert unsorted data
+        unsorted = pl.DataFrame({"a": [30, 10, 20, 5, 25, 15]})
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        # Read back — all data visible
+        result = read_ducklake(cat.metadata_path, "test").sort("a")
+        assert result["a"].to_list() == [1, 2, 3, 5, 10, 15, 20, 25, 30]
+
+        # Verify the last written Parquet file is sorted
+        parquet_files = sorted(
+            glob.glob(os.path.join(cat.data_path, "**/*.parquet"), recursive=True),
+            key=os.path.getmtime,
+        )
+        # The most recent parquet file should contain the sorted unsorted data
+        last_file = parquet_files[-1]
+        table = pq.read_table(last_file)
+        a_values = table.column("a").to_pylist()
+        assert a_values == sorted(a_values), f"Parquet file not sorted: {a_values}"
+
+    def test_sort_keys_with_filter(self, make_write_catalog):
+        """Sorted data has better min/max statistics for filtering."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        # Insert sorted data — statistics should reflect the sorted order
+        data = pl.DataFrame({"a": [100, 50, 200, 10, 150]})
+        write_ducklake(data, cat.metadata_path, "test", mode="append")
+
+        # Read with filter — should work correctly
+        result = read_ducklake(cat.metadata_path, "test")
+        filtered = result.filter(pl.col("a") > 100)
+        assert sorted(filtered["a"].to_list()) == [150, 200]
+
+        # Verify file stats in metadata
+        stats = cat.query_all(
+            "SELECT min_value, max_value FROM ducklake_file_column_stats "
+            "ORDER BY data_file_id DESC LIMIT 1"
+        )
+        assert stats[0][0] == "10"  # min
+        assert stats[0][1] == "200"  # max
+
+    def test_sort_keys_duckdb_interop(self, make_write_catalog):
+        """We set sort keys and write data, DuckDB reads it correctly."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        unsorted = pl.DataFrame({"a": [30, 10, 20], "b": ["c", "a", "b"]})
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        # DuckDB can read the data
+        result = cat.read_with_duckdb("test").sort("a")
+        assert result["a"].to_list() == [1, 2, 3, 10, 20, 30]
+        assert result["b"].to_list() == ["x", "y", "z", "a", "b", "c"]
+
+    def test_sort_keys_multi_column(self, make_write_catalog):
+        """Sort by multiple columns."""
+        import os
+        import glob
+
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1], "b": [1], "c": ["x"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a", "b"])
+
+        unsorted = pl.DataFrame({
+            "a": [2, 1, 2, 1],
+            "b": [2, 1, 1, 2],
+            "c": ["d", "a", "c", "b"],
+        })
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        # Read back all data
+        result = read_ducklake(cat.metadata_path, "test").sort(["a", "b"])
+        assert result["a"].to_list() == [1, 1, 1, 2, 2]
+        assert result["b"].to_list() == [1, 1, 2, 1, 2]
+
+        # Verify parquet file is sorted by (a, b)
+        parquet_files = sorted(
+            glob.glob(os.path.join(cat.data_path, "**/*.parquet"), recursive=True),
+            key=os.path.getmtime,
+        )
+        last_file = parquet_files[-1]
+        table = pq.read_table(last_file)
+        a_vals = table.column("a").to_pylist()
+        b_vals = table.column("b").to_pylist()
+        pairs = list(zip(a_vals, b_vals))
+        assert pairs == sorted(pairs), f"Parquet not sorted by (a, b): {pairs}"
+
+    def test_sort_keys_overwrite(self, make_write_catalog):
+        """Overwrite mode also sorts data by sort keys."""
+        import os
+        import glob
+
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        overwrite_data = pl.DataFrame({"a": [50, 10, 30, 20, 40]})
+        write_ducklake(overwrite_data, cat.metadata_path, "test", mode="overwrite")
+
+        result = read_ducklake(cat.metadata_path, "test").sort("a")
+        assert result["a"].to_list() == [10, 20, 30, 40, 50]
+
+        # Verify parquet file is sorted
+        parquet_files = sorted(
+            glob.glob(os.path.join(cat.data_path, "**/*.parquet"), recursive=True),
+            key=os.path.getmtime,
+        )
+        last_file = parquet_files[-1]
+        table = pq.read_table(last_file)
+        a_values = table.column("a").to_pylist()
+        assert a_values == [10, 20, 30, 40, 50]
+
+    def test_sort_keys_metadata(self, make_write_catalog):
+        """Verify sort keys metadata is stored correctly."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1], "b": ["x"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a", "b"])
+
+        # Check ducklake_sort_info exists with correct data
+        sort_info = cat.query_all(
+            "SELECT sort_id, table_id, begin_snapshot, end_snapshot "
+            "FROM ducklake_sort_info"
+        )
+        assert len(sort_info) == 1
+        assert sort_info[0][3] is None  # end_snapshot is NULL
+
+        # Check ducklake_sort_expression
+        sort_exprs = cat.query_all(
+            "SELECT sort_key_index, expression, sort_direction, null_order "
+            "FROM ducklake_sort_expression ORDER BY sort_key_index"
+        )
+        assert len(sort_exprs) == 2
+        assert sort_exprs[0][0] == 0  # sort_key_index
+        assert sort_exprs[0][2] == "asc"
+        assert sort_exprs[1][0] == 1
+
+    def test_sort_keys_nonexistent_column_raises(self, make_write_catalog):
+        """Setting sort keys with nonexistent column raises."""
+        cat = make_write_catalog()
+        df = pl.DataFrame({"a": [1]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        with pytest.raises(ValueError, match="not found"):
+            alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["missing"])
+
+    def test_sort_keys_nonexistent_table_raises(self, make_write_catalog):
+        """Setting sort keys on nonexistent table raises."""
+        cat = make_write_catalog()
+
+        with pytest.raises(ValueError, match="not found"):
+            alter_ducklake_set_sort_keys(cat.metadata_path, "missing", ["a"])

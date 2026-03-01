@@ -26,6 +26,7 @@ __all__ = [
     "alter_ducklake_rename_column",
     "alter_ducklake_set_type",
     "alter_ducklake_set_partitioned_by",
+    "alter_ducklake_set_sort_keys",
     "drop_ducklake_table",
     "create_ducklake_schema",
     "drop_ducklake_schema",
@@ -877,6 +878,54 @@ def alter_ducklake_set_partitioned_by(
         author=author, commit_message=commit_message,
     ) as writer:
         writer.set_partitioned_by(table, column_names, schema_name=schema)
+
+
+def alter_ducklake_set_sort_keys(
+    path: str | Path,
+    table: str,
+    column_names: list[str],
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Set sort keys on a DuckLake table.
+
+    Equivalent to ``ALTER TABLE t SET SORTED BY (col1, col2, ...)``.
+    Future writes will sort data by these columns before writing Parquet
+    files, improving filter pushdown via Parquet row group statistics.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the table.
+    column_names
+        Column names to sort by (ascending order).
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table or any column does not exist.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+        author=author, commit_message=commit_message,
+    ) as writer:
+        writer.set_sort_keys(table, column_names, schema_name=schema)
 
 
 def alter_ducklake_set_type(

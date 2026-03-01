@@ -1,4 +1,4 @@
-"""Tests for ducklake-pandas ALTER TABLE support (ADD/DROP COLUMN)."""
+"""Tests for ducklake-pandas ALTER TABLE support (ADD/DROP COLUMN, SORT KEYS)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from tests_pandas.helpers import assert_list_equal
 from ducklake_pandas import (
     alter_ducklake_add_column,
     alter_ducklake_drop_column,
+    alter_ducklake_set_sort_keys,
     alter_ducklake_set_type,
     read_ducklake,
     write_ducklake,
@@ -546,3 +547,115 @@ class TestSetType:
         result = cat.read_with_duckdb("test")
         assert sorted(result["a"].tolist()) == [1, 2]
         assert sorted(result["b"].tolist()) == ["x", "y"]
+
+
+# ---------------------------------------------------------------------------
+# SORT KEYS: optimized Parquet writes
+# ---------------------------------------------------------------------------
+
+
+class TestSortKeys:
+    """Test ALTER TABLE SET SORT KEYS."""
+
+    def test_set_sort_keys_basic(self, make_write_catalog):
+        """Set sort keys, write data, verify Parquet file is sorted."""
+        import os
+        import glob
+        import pyarrow.parquet as pq
+
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        # Insert unsorted data
+        unsorted = pd.DataFrame({"a": [30, 10, 20, 5, 25, 15]})
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        # Read back — all data visible
+        result = read_ducklake(cat.metadata_path, "test").sort_values("a")
+        assert result["a"].tolist() == [1, 2, 3, 5, 10, 15, 20, 25, 30]
+
+        # Verify the last written Parquet file is sorted
+        parquet_files = sorted(
+            glob.glob(os.path.join(cat.data_path, "**/*.parquet"), recursive=True),
+            key=os.path.getmtime,
+        )
+        last_file = parquet_files[-1]
+        table = pq.read_table(last_file)
+        a_values = table.column("a").to_pylist()
+        assert a_values == sorted(a_values), f"Parquet file not sorted: {a_values}"
+
+    def test_sort_keys_with_filter(self, make_write_catalog):
+        """Sorted data has better min/max statistics for filtering."""
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        data = pd.DataFrame({"a": [100, 50, 200, 10, 150]})
+        write_ducklake(data, cat.metadata_path, "test", mode="append")
+
+        result = read_ducklake(cat.metadata_path, "test")
+        filtered = result[result["a"] > 100]
+        assert sorted(filtered["a"].tolist()) == [150, 200]
+
+        # Verify file stats
+        stats = cat.query_all(
+            "SELECT min_value, max_value FROM ducklake_file_column_stats "
+            "ORDER BY data_file_id DESC LIMIT 1"
+        )
+        assert stats[0][0] == "10"
+        assert stats[0][1] == "200"
+
+    def test_sort_keys_duckdb_interop(self, make_write_catalog):
+        """We set sort keys and write data, DuckDB reads it correctly."""
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a"])
+
+        unsorted = pd.DataFrame({"a": [30, 10, 20], "b": ["c", "a", "b"]})
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        result = cat.read_with_duckdb("test").sort_values("a")
+        assert result["a"].tolist() == [1, 2, 3, 10, 20, 30]
+        assert result["b"].tolist() == ["x", "y", "z", "a", "b", "c"]
+
+    def test_sort_keys_multi_column(self, make_write_catalog):
+        """Sort by multiple columns."""
+        import os
+        import glob
+        import pyarrow.parquet as pq
+
+        cat = make_write_catalog()
+        df = pd.DataFrame({"a": [1], "b": [1], "c": ["x"]})
+        write_ducklake(df, cat.metadata_path, "test", mode="error")
+
+        alter_ducklake_set_sort_keys(cat.metadata_path, "test", ["a", "b"])
+
+        unsorted = pd.DataFrame({
+            "a": [2, 1, 2, 1],
+            "b": [2, 1, 1, 2],
+            "c": ["d", "a", "c", "b"],
+        })
+        write_ducklake(unsorted, cat.metadata_path, "test", mode="append")
+
+        result = read_ducklake(cat.metadata_path, "test").sort_values(["a", "b"])
+        assert result["a"].tolist() == [1, 1, 1, 2, 2]
+        assert result["b"].tolist() == [1, 1, 2, 1, 2]
+
+        # Verify parquet file is sorted by (a, b)
+        parquet_files = sorted(
+            glob.glob(os.path.join(cat.data_path, "**/*.parquet"), recursive=True),
+            key=os.path.getmtime,
+        )
+        last_file = parquet_files[-1]
+        table = pq.read_table(last_file)
+        a_vals = table.column("a").to_pylist()
+        b_vals = table.column("b").to_pylist()
+        pairs = list(zip(a_vals, b_vals))
+        assert pairs == sorted(pairs), f"Parquet not sorted by (a, b): {pairs}"
