@@ -2,12 +2,12 @@
 """
 DuckLake read/write performance benchmarks.
 
-Self-tracking benchmarks for ducklake-polars and ducklake-pandas.
+Self-tracking benchmarks for ducklake-dataframe and ducklake-pandas.
 Use to detect regressions and measure improvement over time.
 
 Measures:
-  - Write performance (ducklake-polars vs ducklake-pandas)
-  - Read performance (ducklake-polars vs ducklake-pandas)
+  - Write performance (ducklake-dataframe vs ducklake-pandas)
+  - Read performance (ducklake-dataframe vs ducklake-pandas)
   - Arrow conversion overhead (pl.DataFrame ↔ pa.Table, pd.DataFrame ↔ pa.Table)
   - Filter pushdown: filtered scan vs full scan (polars only)
 
@@ -119,7 +119,7 @@ def bench_write(sizes: list[int], runs: int) -> list[dict[str, Any]]:
         pl_df = _generate_polars_df(n)
         pd_df = _generate_pandas_df(n)
 
-        # ducklake-polars write
+        # ducklake-dataframe write
         tmp = tempfile.mkdtemp()
         try:
             meta, data = _setup_catalog(tmp, "polars")
@@ -129,7 +129,7 @@ def bench_write(sizes: list[int], runs: int) -> list[dict[str, Any]]:
                 write_ducklake(pl_df, meta, tbl, mode="error", data_path=data)
 
             t = _timeit(write_polars, runs)
-            results.append({"operation": "write", "method": "ducklake-polars", "rows": n, "time_s": t})
+            results.append({"operation": "write", "method": "ducklake-dataframe", "rows": n, "time_s": t})
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -176,9 +176,9 @@ def bench_read(sizes: list[int], runs: int) -> list[dict[str, Any]]:
             con.execute("INSERT INTO ducklake.bench SELECT * FROM pl_df")
             con.close()
 
-            # ducklake-polars read
+            # ducklake-dataframe read
             t = _timeit(lambda: read_ducklake(meta, "bench"), runs)
-            results.append({"operation": "read", "method": "ducklake-polars", "rows": n, "time_s": t})
+            results.append({"operation": "read", "method": "ducklake-dataframe", "rows": n, "time_s": t})
 
             # ducklake-pandas read
             t = _timeit(lambda: pd_read_ducklake(meta, "bench"), runs)
@@ -245,7 +245,7 @@ def bench_filter_pushdown(sizes: list[int], runs: int) -> list[dict[str, Any]]:
 
             # Full scan (polars)
             t = _timeit(lambda: scan_ducklake(meta, "bench").collect(), runs)
-            results.append({"operation": "full_scan", "method": "ducklake-polars", "rows": n, "time_s": t})
+            results.append({"operation": "full_scan", "method": "ducklake-dataframe", "rows": n, "time_s": t})
 
             # Filtered scan (polars) — select ~50%
             threshold = n // 2
@@ -253,7 +253,7 @@ def bench_filter_pushdown(sizes: list[int], runs: int) -> list[dict[str, Any]]:
                 lambda: scan_ducklake(meta, "bench").filter(pl.col("id") > threshold).collect(),
                 runs,
             )
-            results.append({"operation": "filtered_scan", "method": "ducklake-polars", "rows": n, "time_s": t})
+            results.append({"operation": "filtered_scan", "method": "ducklake-dataframe", "rows": n, "time_s": t})
 
             # Full read (pandas)
             t = _timeit(lambda: pd_read_ducklake(meta, "bench"), runs)

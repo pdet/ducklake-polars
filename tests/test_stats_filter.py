@@ -1,4 +1,4 @@
-"""Filter pushdown and statistics tests for ducklake-polars."""
+"""Filter pushdown and statistics tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Catalog and general tests for ducklake-polars."""
+"""Catalog and general tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

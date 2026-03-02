@@ -1,4 +1,4 @@
-"""Update operation read tests for ducklake-polars.
+"""Update operation read tests for ducklake-dataframe.
 
 DuckLake implements UPDATE as DELETE + INSERT. These tests verify that
 reading tables after UPDATE operations returns correct results.

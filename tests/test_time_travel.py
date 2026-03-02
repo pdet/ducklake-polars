@@ -1,4 +1,4 @@
-"""Time travel tests for ducklake-polars."""
+"""Time travel tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

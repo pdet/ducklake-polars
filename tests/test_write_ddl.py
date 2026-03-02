@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars DDL operations (rename column, drop table,
+"""Tests for ducklake-dataframe DDL operations (rename column, drop table,
 create/drop schema, rename table)."""
 
 from __future__ import annotations

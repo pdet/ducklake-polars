@@ -98,7 +98,7 @@ class PostgreSQLBackend:
         except ImportError:
             msg = (
                 "psycopg2 is required for PostgreSQL catalog backends. "
-                "Install it with: pip install ducklake-polars[postgres]"
+                "Install it with: pip install ducklake-dataframe[postgres]"
             )
             raise ImportError(msg) from None
 

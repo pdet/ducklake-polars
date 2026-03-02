@@ -1,4 +1,4 @@
-"""Type mapping tests for ducklake-polars."""
+"""Type mapping tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

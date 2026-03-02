@@ -1,6 +1,6 @@
-"""Cross-implementation compatibility tests: ducklake-polars ↔ DuckDB native ducklake.
+"""Cross-implementation compatibility tests: ducklake-dataframe ↔ DuckDB native ducklake.
 
-Verifies bidirectional compatibility between ducklake-polars and DuckDB's
+Verifies bidirectional compatibility between ducklake-dataframe and DuckDB's
 native ducklake extension. All tests use a shared catalog so that data written
 by one system is readable by the other.
 
@@ -99,7 +99,7 @@ def _init_catalog(tmp_path, *, inline: bool = False):
 
 
 class TestDuckDBWritesPolarsReads:
-    """DuckDB creates and populates tables; ducklake-polars reads them."""
+    """DuckDB creates and populates tables; ducklake-dataframe reads them."""
 
     # --- Scalar types ---------------------------------------------------
 
@@ -472,7 +472,7 @@ class TestDuckDBWritesPolarsReads:
 
 
 class TestPolarsWritesDuckDBReads:
-    """ducklake-polars creates and populates tables; DuckDB reads them."""
+    """ducklake-dataframe creates and populates tables; DuckDB reads them."""
 
     # --- Scalar types ---------------------------------------------------
 
@@ -1087,7 +1087,7 @@ def _duckdb_read(cat, table: str, *, schema: str | None = None) -> list[tuple]:
 
 
 class TestBasicInterop:
-    """Test that basic DuckDB writes are correctly read by ducklake-polars."""
+    """Test that basic DuckDB writes are correctly read by ducklake-dataframe."""
 
     def test_single_row(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -1178,7 +1178,7 @@ class TestBasicInterop:
 
 
 class TestTypeInterop:
-    """Verify type round-trips: DuckDB writes -> ducklake-polars reads."""
+    """Verify type round-trips: DuckDB writes -> ducklake-dataframe reads."""
 
     def test_integer_types_interop(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -1444,7 +1444,7 @@ class TestTypeInterop:
 
 
 class TestDeleteInterop:
-    """Verify delete operations: DuckDB deletes -> ducklake-polars reads."""
+    """Verify delete operations: DuckDB deletes -> ducklake-dataframe reads."""
 
     def test_basic_delete_interop(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -1543,7 +1543,7 @@ class TestDeleteInterop:
 
 
 class TestUpdateInterop:
-    """Verify UPDATE operations: DuckDB updates -> ducklake-polars reads."""
+    """Verify UPDATE operations: DuckDB updates -> ducklake-dataframe reads."""
 
     def test_basic_update_interop(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -1630,7 +1630,7 @@ class TestUpdateInterop:
 
 
 class TestSchemaEvolutionInterop:
-    """Verify schema evolution: DuckDB ALTER -> ducklake-polars reads."""
+    """Verify schema evolution: DuckDB ALTER -> ducklake-dataframe reads."""
 
     def test_add_column_interop(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -2090,7 +2090,7 @@ class TestDataInliningInterop:
 
 
 class TestTableChangesInterop:
-    """Verify change data feed: DuckDB operations -> ducklake-polars table_changes()."""
+    """Verify change data feed: DuckDB operations -> ducklake-dataframe table_changes()."""
 
     def test_insertions_tracked_interop(self, ducklake_catalog):
         cat = ducklake_catalog
@@ -2394,7 +2394,7 @@ class TestViewInterop:
         duckdb_view = cat.fetchall("SELECT * FROM ducklake.v1")
         cat.close()
 
-        # Views are readable in DuckDB but ducklake-polars only reads tables
+        # Views are readable in DuckDB but ducklake-dataframe only reads tables
         # Just verify the underlying table is correct
         result = read_ducklake(cat.metadata_path, "test")
         assert result.shape[0] == 2
@@ -2418,7 +2418,7 @@ class TestViewInterop:
 
 
 class TestMergeInterop:
-    """Verify MERGE operations: DuckDB merges -> ducklake-polars reads."""
+    """Verify MERGE operations: DuckDB merges -> ducklake-dataframe reads."""
 
     def test_merge_update_insert_interop(self, ducklake_catalog):
         cat = ducklake_catalog

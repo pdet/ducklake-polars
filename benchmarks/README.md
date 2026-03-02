@@ -1,6 +1,6 @@
 # Benchmarks
 
-Self-tracking performance benchmarks for ducklake-polars and ducklake-pandas.
+Self-tracking performance benchmarks for ducklake-dataframe and ducklake-pandas.
 
 Use these to detect regressions and measure the impact of optimizations. Not for comparing against other systems.
 

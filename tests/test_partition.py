@@ -1,4 +1,4 @@
-"""Partition pruning tests for ducklake-polars."""
+"""Partition pruning tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

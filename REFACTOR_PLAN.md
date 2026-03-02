@@ -1,7 +1,7 @@
 # Arrow Unified API Refactor Plan
 
 ## Goal
-Refactor ducklake-polars to use PyArrow as the internal data representation,
+Refactor ducklake-dataframe to use PyArrow as the internal data representation,
 then add pandas support as a thin wrapper. The result is a single repo with
 three packages: `ducklake_core` (Arrow-based internals), `ducklake_polars`
 (thin Polars wrapper), and `ducklake_pandas` (thin pandas wrapper).

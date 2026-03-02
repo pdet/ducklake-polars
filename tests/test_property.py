@@ -1,4 +1,4 @@
-"""Property-based tests for ducklake-polars using Hypothesis.
+"""Property-based tests for ducklake-dataframe using Hypothesis.
 
 Stress-tests the roundtrip: write random data → read it back → verify it matches.
 """

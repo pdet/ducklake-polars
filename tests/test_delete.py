@@ -1,4 +1,4 @@
-"""Delete handling tests for ducklake-polars."""
+"""Delete handling tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

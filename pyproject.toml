@@ -32,9 +32,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pdet/ducklake-polars"
-Repository = "https://github.com/pdet/ducklake-polars"
-Issues = "https://github.com/pdet/ducklake-polars/issues"
+Homepage = "https://github.com/pdet/ducklake-dataframe"
+Repository = "https://github.com/pdet/ducklake-dataframe"
+Issues = "https://github.com/pdet/ducklake-dataframe/issues"
 
 [project.optional-dependencies]
 polars = ["polars>=1.0"]
@@ -51,6 +51,9 @@ all = [
     "duckdb>=1.2",
     "psycopg2-binary>=2.9",
     "fsspec>=2023.1",
+    "s3fs",
+    "gcsfs",
+    "adlfs",
 ]
 dev = [
     "pytest>=7.0",

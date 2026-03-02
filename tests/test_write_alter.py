@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars ALTER TABLE support (ADD/DROP COLUMN, SORT KEYS)."""
+"""Tests for ducklake-dataframe ALTER TABLE support (ADD/DROP COLUMN, SORT KEYS)."""
 
 from __future__ import annotations
 
@@ -572,7 +572,7 @@ class TestSetType:
         con.execute("ALTER TABLE ducklake.test ALTER COLUMN a SET DATA TYPE BIGINT")
         con.close()
 
-        # Read with ducklake-polars
+        # Read with ducklake-dataframe
         result = read_ducklake(cat.metadata_path, "test").sort("a")
         assert result["a"].to_list() == [1, 2]
         assert result["a"].dtype == pl.Int64

@@ -1,4 +1,4 @@
-"""Edge case tests for ducklake-polars.
+"""Edge case tests for ducklake-dataframe.
 
 Tests unusual inputs, boundary conditions, error handling, and uncommon
 but valid DuckLake operations. Each test verifies both row counts and

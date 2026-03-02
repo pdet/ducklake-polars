@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars MERGE and CREATE TABLE AS support."""
+"""Tests for ducklake-dataframe MERGE and CREATE TABLE AS support."""
 
 from __future__ import annotations
 
@@ -333,7 +333,7 @@ class TestMergeDuckDBInterop:
     """Verify merged catalogs are readable by DuckDB."""
 
     def test_polars_merge_duckdb_reads(self, make_write_catalog):
-        """Write + merge with ducklake-polars, read with DuckDB."""
+        """Write + merge with ducklake-dataframe, read with DuckDB."""
         cat = make_write_catalog()
         df = pl.DataFrame({"id": [1, 2, 3], "val": ["a", "b", "c"]})
         write_ducklake(df, cat.metadata_path, "test", mode="error")
@@ -383,7 +383,7 @@ class TestMergeDuckDBInterop:
         assert updated == 2
         assert inserted == 1
 
-        # Read with ducklake-polars
+        # Read with ducklake-dataframe
         result = read_ducklake(cat.metadata_path, "test").sort("id")
         assert result["val"].to_list() == ["one", "TWO", "THREE", "FOUR"]
 

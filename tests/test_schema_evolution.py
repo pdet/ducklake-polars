@@ -1,4 +1,4 @@
-"""Schema evolution tests for ducklake-polars."""
+"""Schema evolution tests for ducklake-dataframe."""
 
 from __future__ import annotations
 

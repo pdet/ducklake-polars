@@ -1,4 +1,4 @@
-"""Basic tests for ducklake-polars scan and read operations."""
+"""Basic tests for ducklake-dataframe scan and read operations."""
 
 from __future__ import annotations
 

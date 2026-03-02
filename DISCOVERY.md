@@ -5,7 +5,7 @@
 This document captures findings from exploring the three sibling repositories:
 - **ducklake** - The DuckLake lakehouse format (DuckDB C++ extension)
 - **polars** - The Polars DataFrame library
-- **ducklake-polars** - This repo (empty, greenfield)
+- **ducklake-dataframe** - This repo (empty, greenfield)
 
 ---
 
@@ -195,11 +195,11 @@ ATTACH 'ducklake:${DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '${DATA_PATH}/du
 
 ---
 
-## 4. Design Decisions for ducklake-polars
+## 4. Design Decisions for ducklake-dataframe
 
 ### Standalone Package vs. Polars Contribution
 
-**Decision: Standalone Python package** (`ducklake-polars`)
+**Decision: Standalone Python package** (`ducklake-dataframe`)
 
 Rationale:
 - DuckLake is experimental (v0.x), not yet stable enough for Polars core

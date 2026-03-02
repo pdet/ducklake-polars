@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars write path (Phase 5a + 5b)."""
+"""Tests for ducklake-dataframe write path (Phase 5a + 5b)."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ class TestCreateTable:
         assert versions[0] > 0
 
     def test_create_table_duckdb_interop(self, make_write_catalog):
-        """DuckDB can read a table created by ducklake-polars."""
+        """DuckDB can read a table created by ducklake-dataframe."""
         cat = make_write_catalog()
         schema = {"a": pl.Int32(), "b": pl.String()}
 
@@ -274,12 +274,12 @@ class TestWriteDucklake:
 
 
 # ---------------------------------------------------------------------------
-# DuckDB interop: write with ducklake-polars, read with DuckDB
+# DuckDB interop: write with ducklake-dataframe, read with DuckDB
 # ---------------------------------------------------------------------------
 
 
 class TestDuckDBInterop:
-    """Verify that catalogs written by ducklake-polars are readable by DuckDB."""
+    """Verify that catalogs written by ducklake-dataframe are readable by DuckDB."""
 
     def test_basic_interop(self, make_write_catalog):
         cat = make_write_catalog()
@@ -367,12 +367,12 @@ class TestDuckDBInterop:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip: write with ducklake-polars, read with ducklake-polars
+# Round-trip: write with ducklake-dataframe, read with ducklake-dataframe
 # ---------------------------------------------------------------------------
 
 
 class TestRoundTrip:
-    """Write and read with ducklake-polars (no DuckDB in the loop)."""
+    """Write and read with ducklake-dataframe (no DuckDB in the loop)."""
 
     def test_roundtrip_basic(self, make_write_catalog):
         cat = make_write_catalog()
@@ -608,7 +608,7 @@ class TestWriteEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# DuckDB writes, ducklake-polars reads (existing capability, regression)
+# DuckDB writes, ducklake-dataframe reads (existing capability, regression)
 # ---------------------------------------------------------------------------
 
 
@@ -616,7 +616,7 @@ class TestDuckDBWritePolarsRead:
     """Verify existing read path still works with DuckDB-created catalogs."""
 
     def test_duckdb_write_polars_read(self, tmp_path):
-        """Standard flow: DuckDB creates data, ducklake-polars reads."""
+        """Standard flow: DuckDB creates data, ducklake-dataframe reads."""
         metadata_path = str(tmp_path / "test.ducklake")
         data_path = str(tmp_path / "data")
         os.makedirs(data_path, exist_ok=True)

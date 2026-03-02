@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars view operations (CREATE VIEW, DROP VIEW)."""
+"""Tests for ducklake-dataframe view operations (CREATE VIEW, DROP VIEW)."""
 
 from __future__ import annotations
 

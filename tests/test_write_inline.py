@@ -41,7 +41,7 @@ class TestInlinedInsert:
             mode="error", data_inlining_row_limit=INLINE_LIMIT,
         )
 
-        # Read back with ducklake-polars
+        # Read back with ducklake-dataframe
         result = read_ducklake(cat.metadata_path, "test")
         assert_frame_equal(result.sort("a"), df.sort("a"))
 
@@ -124,12 +124,12 @@ class TestInlinedInsert:
 
 
 # ---------------------------------------------------------------------------
-# DuckDB interop: DuckDB reads inlined data written by ducklake-polars
+# DuckDB interop: DuckDB reads inlined data written by ducklake-dataframe
 # ---------------------------------------------------------------------------
 
 
 class TestInlinedDuckDBInterop:
-    """DuckDB can read inlined data written by ducklake-polars."""
+    """DuckDB can read inlined data written by ducklake-dataframe."""
 
     def test_duckdb_reads_inlined(self, make_write_catalog):
         cat = make_write_catalog()
@@ -162,12 +162,12 @@ class TestInlinedDuckDBInterop:
 
 
 # ---------------------------------------------------------------------------
-# Reverse interop: DuckDB writes inlined data, ducklake-polars reads
+# Reverse interop: DuckDB writes inlined data, ducklake-dataframe reads
 # ---------------------------------------------------------------------------
 
 
 class TestDuckDBInlinedPolarsRead:
-    """ducklake-polars reads inlined data written by DuckDB."""
+    """ducklake-dataframe reads inlined data written by DuckDB."""
 
     def test_duckdb_inline_polars_read(self, make_write_catalog):
         cat = make_write_catalog(inline=True, inline_limit=1000)
@@ -276,7 +276,7 @@ class TestInlinedDelete:
         assert deleted == 0
 
     def test_delete_inlined_duckdb_interop(self, make_write_catalog):
-        """DuckDB can read after inlined delete by ducklake-polars."""
+        """DuckDB can read after inlined delete by ducklake-dataframe."""
         cat = make_write_catalog()
         df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
 

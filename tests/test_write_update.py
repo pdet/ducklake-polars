@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars UPDATE support."""
+"""Tests for ducklake-dataframe UPDATE support."""
 
 from __future__ import annotations
 
@@ -198,7 +198,7 @@ class TestUpdateDuckDBInterop:
     """Verify updated catalogs are readable by DuckDB."""
 
     def test_polars_update_duckdb_reads(self, make_write_catalog):
-        """Write + update with ducklake-polars, read with DuckDB."""
+        """Write + update with ducklake-dataframe, read with DuckDB."""
         cat = make_write_catalog()
         df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
         write_ducklake(df, cat.metadata_path, "test", mode="error")
@@ -237,7 +237,7 @@ class TestUpdateDuckDBInterop:
         )
         assert updated == 2
 
-        # Read with ducklake-polars
+        # Read with ducklake-dataframe
         result = read_ducklake(cat.metadata_path, "test").sort("a")
         assert result["b"].to_list() == ["one", "CHANGED", "CHANGED"]
 

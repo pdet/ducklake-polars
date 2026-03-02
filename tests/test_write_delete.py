@@ -1,4 +1,4 @@
-"""Tests for ducklake-polars DELETE support (Phase 5e)."""
+"""Tests for ducklake-dataframe DELETE support (Phase 5e)."""
 
 from __future__ import annotations
 
@@ -278,7 +278,7 @@ class TestDeleteDuckDBInterop:
     """Verify delete files are readable by DuckDB."""
 
     def test_basic_delete_duckdb_reads(self, make_write_catalog):
-        """Write + delete with ducklake-polars, read with DuckDB."""
+        """Write + delete with ducklake-dataframe, read with DuckDB."""
         cat = make_write_catalog()
         df = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": ["a", "b", "c", "d", "e"]})
         write_ducklake(df, cat.metadata_path, "test", mode="error")
@@ -328,15 +328,15 @@ class TestDeleteDuckDBInterop:
 
 
 # ---------------------------------------------------------------------------
-# DuckDB writes, ducklake-polars deletes, both read
+# DuckDB writes, ducklake-dataframe deletes, both read
 # ---------------------------------------------------------------------------
 
 
 class TestDuckDBWritePolarsDelete:
-    """DuckDB creates the data, ducklake-polars deletes, both read."""
+    """DuckDB creates the data, ducklake-dataframe deletes, both read."""
 
     def test_duckdb_write_polars_delete(self, make_write_catalog):
-        """Write with DuckDB, delete with ducklake-polars, read with both."""
+        """Write with DuckDB, delete with ducklake-dataframe, read with both."""
         cat = make_write_catalog()
 
         # Write data with DuckDB
@@ -359,11 +359,11 @@ class TestDuckDBWritePolarsDelete:
         )
         con.close()
 
-        # Delete with ducklake-polars
+        # Delete with ducklake-dataframe
         deleted = delete_ducklake(cat.metadata_path, "test", pl.col("a") > 3)
         assert deleted == 2
 
-        # Read with ducklake-polars
+        # Read with ducklake-dataframe
         result = read_ducklake(cat.metadata_path, "test")
         assert sorted(result["a"].to_list()) == [1, 2, 3]
 

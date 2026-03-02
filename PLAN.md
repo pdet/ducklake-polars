@@ -2,7 +2,7 @@
 
 ## Project Summary
 
-`ducklake-polars` is a Python package that provides Polars integration for DuckLake catalogs. It enables reading DuckLake tables as Polars LazyFrames/DataFrames with full support for predicate pushdown, schema evolution, time travel, and delete handling.
+`ducklake-dataframe` is a Python package that provides Polars integration for DuckLake catalogs. It enables reading DuckLake tables as Polars LazyFrames/DataFrames with full support for predicate pushdown, schema evolution, time travel, and delete handling.
 
 ---
 
@@ -37,7 +37,7 @@ Internal:
 ### Dependencies
 
 - `polars` (>= 1.0) — only runtime dependency
-- `psycopg2-binary` (>= 2.9) — optional, for PostgreSQL backends (`pip install ducklake-polars[postgres]`)
+- `psycopg2-binary` (>= 2.9) — optional, for PostgreSQL backends (`pip install ducklake-dataframe[postgres]`)
 - `duckdb` — **test-only** dependency (creates catalog fixtures)
 
 ---
@@ -45,7 +45,7 @@ Internal:
 ## Package Structure
 
 ```
-ducklake-polars/
+ducklake-dataframe/
     pyproject.toml
     README.md
     CLAUDE.md

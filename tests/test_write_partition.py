@@ -1,4 +1,4 @@
-"""Tests for partitioned writes in ducklake-polars."""
+"""Tests for partitioned writes in ducklake-dataframe."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ class TestSetPartitionedBy:
             alter_ducklake_set_partitioned_by(cat.metadata_path, "test", ["missing"])
 
     def test_set_partitioned_by_duckdb_reads(self, make_write_catalog):
-        """DuckDB can read the partition spec created by ducklake-polars."""
+        """DuckDB can read the partition spec created by ducklake-dataframe."""
         cat = make_write_catalog()
         df = pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "x"]})
         write_ducklake(df, cat.metadata_path, "test", mode="error")
@@ -358,10 +358,10 @@ class TestPartitionedOverwrite:
 
 
 class TestPartitionedDuckDBInterop:
-    """DuckDB can read partitioned data written by ducklake-polars."""
+    """DuckDB can read partitioned data written by ducklake-dataframe."""
 
     def test_duckdb_reads_polars_partitioned_insert(self, make_write_catalog):
-        """DuckDB reads data written by ducklake-polars into partitioned table."""
+        """DuckDB reads data written by ducklake-dataframe into partitioned table."""
         cat = make_write_catalog()
         create_ducklake_table(
             cat.metadata_path, "test", {"a": pl.Int64(), "b": pl.String()},
@@ -393,7 +393,7 @@ class TestPartitionedDuckDBInterop:
         assert sorted(pdf["a"].to_list()) == [1, 2, 3]
 
     def test_duckdb_writes_polars_reads_partitioned(self, make_write_catalog):
-        """DuckDB creates partitioned table, ducklake-polars writes to it."""
+        """DuckDB creates partitioned table, ducklake-dataframe writes to it."""
         cat = make_write_catalog()
 
         # Use DuckDB to create partitioned table structure
@@ -413,7 +413,7 @@ class TestPartitionedDuckDBInterop:
         con.execute("ALTER TABLE ducklake.test SET PARTITIONED BY (b)")
         con.close()
 
-        # Insert via ducklake-polars (cast to Int32 to match DuckDB's INTEGER)
+        # Insert via ducklake-dataframe (cast to Int32 to match DuckDB's INTEGER)
         df = pl.DataFrame({"a": pl.Series([1, 2, 3], dtype=pl.Int32), "b": ["x", "y", "x"]})
         write_ducklake(df, cat.metadata_path, "test", mode="append")
 
@@ -422,7 +422,7 @@ class TestPartitionedDuckDBInterop:
         assert result["b"].to_list() == ["x", "y", "x"]
 
     def test_duckdb_insert_then_polars_insert_partitioned(self, make_write_catalog):
-        """DuckDB inserts data, then ducklake-polars appends to same partitioned table."""
+        """DuckDB inserts data, then ducklake-dataframe appends to same partitioned table."""
         cat = make_write_catalog()
 
         # Use DuckDB to create table, partition, and insert initial data
@@ -443,7 +443,7 @@ class TestPartitionedDuckDBInterop:
         con.execute("INSERT INTO ducklake.test VALUES (1, 'x'), (2, 'y')")
         con.close()
 
-        # Append via ducklake-polars (cast to Int32 to match DuckDB's INTEGER)
+        # Append via ducklake-dataframe (cast to Int32 to match DuckDB's INTEGER)
         df = pl.DataFrame({"a": pl.Series([3, 4], dtype=pl.Int32), "b": ["x", "z"]})
         write_ducklake(df, cat.metadata_path, "test", mode="append")
 
@@ -458,7 +458,7 @@ class TestPartitionedDuckDBInterop:
 
 
 class TestPartitionedRoundTrip:
-    """Write and read partitioned data with ducklake-polars."""
+    """Write and read partitioned data with ducklake-dataframe."""
 
     def test_roundtrip_basic(self, make_write_catalog):
         cat = make_write_catalog()
@@ -525,7 +525,7 @@ class TestPartitionedRoundTrip:
 
 
 class TestPartitionedDelete:
-    """Test DELETE on partitioned tables written by ducklake-polars."""
+    """Test DELETE on partitioned tables written by ducklake-dataframe."""
 
     def test_delete_from_partitioned(self, make_write_catalog):
         from ducklake_polars import delete_ducklake
@@ -553,7 +553,7 @@ class TestPartitionedDelete:
 
 
 class TestPartitionedUpdate:
-    """Test UPDATE on partitioned tables written by ducklake-polars."""
+    """Test UPDATE on partitioned tables written by ducklake-dataframe."""
 
     def test_update_non_partition_column(self, make_write_catalog):
         from ducklake_polars import update_ducklake

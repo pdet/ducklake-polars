@@ -1,4 +1,4 @@
-# ducklake-polars
+# ducklake-dataframe
 
 > **This file is the primary onboarding document for Claude instances working on this project.
 > Keep it up to date as the codebase evolves. If you add a module, change an architectural
@@ -138,7 +138,7 @@ pytest tests/test_types.py -v  # run specific file
 
 DuckDB is **only a test dependency**. Tests use DuckDB + the DuckLake extension to create
 catalogs (SQLite-backed in temp dirs, PostgreSQL when `DUCKLAKE_PG_DSN` is set), then read
-them back with ducklake-polars.
+them back with ducklake-dataframe.
 
 Test fixtures are in `tests/conftest.py`:
 - `ducklake_catalog` -- data inlining **disabled** (forces Parquet files). Used by most tests.
@@ -154,7 +154,7 @@ The `DuckLakeTestCatalog` helper handles both backends:
   DuckDB is closed). Handles `?` → `%s` placeholder translation for PostgreSQL.
 - `_cleanup_postgres_tables()`: drops all public tables between tests for isolation.
 
-The caller **must** call `cat.close()` before reading with ducklake-polars to release the
+The caller **must** call `cat.close()` before reading with ducklake-dataframe to release the
 SQLite file lock. For tests that need direct metadata access after closing, use
 `cat.query_metadata()` instead of opening sqlite3 directly.
 
@@ -188,7 +188,7 @@ Known xfails: HUGEINT, UHUGEINT, INTERVAL, MAP — DuckDB Parquet writer or Pola
 ## Conventions
 
 - Only runtime dependency is `polars >= 1.0`. PostgreSQL support requires the `postgres` extra
-  (`pip install ducklake-polars[postgres]`). No DuckDB, no PyArrow, no other dependencies.
+  (`pip install ducklake-dataframe[postgres]`). No DuckDB, no PyArrow, no other dependencies.
 - All SQL queries use parameterized `?` placeholders for values (translated to `%s` for PostgreSQL
   by the `_sql()` helper). Identifiers (table names, column names) use double-quote escaping
   with embedded quotes doubled (`"` -> `""`).

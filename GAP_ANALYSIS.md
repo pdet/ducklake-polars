@@ -1,6 +1,6 @@
 # DuckLake Compatibility Gap Analysis
 
-**ducklake-polars / ducklake-pandas vs. DuckDB's native ducklake extension**
+**ducklake-dataframe / ducklake-pandas vs. DuckDB's native ducklake extension**
 
 _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
@@ -10,7 +10,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### DDL — Data Definition Language
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | CREATE TABLE | ✅ Full SQL syntax | ✅ `create_ducklake_table()` | ✅ `create_ducklake_table()` | ✅ Full |
 | CREATE TABLE AS SELECT | ✅ `CREATE TABLE ... AS` | ✅ `create_table_as_ducklake()` | ✅ `create_table_as_ducklake()` | ✅ Full |
@@ -30,7 +30,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### DML — Data Manipulation Language
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | INSERT | ✅ Full SQL | ✅ `write_ducklake()` | ✅ `write_ducklake()` | ✅ Full |
 | DELETE (predicate) | ✅ `DELETE FROM ... WHERE` | ✅ `delete_ducklake()` (pl.Expr) | ✅ `delete_ducklake()` (callable) | ✅ Full |
@@ -41,7 +41,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Write Modes
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Error (fail if exists) | ✅ `CREATE TABLE` | ✅ `mode="error"` | ✅ `mode="error"` | ✅ Full |
 | Append | ✅ `INSERT INTO` | ✅ `mode="append"` | ✅ `mode="append"` | ✅ Full |
@@ -49,7 +49,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Partitioning
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Identity transforms | ✅ Full | ✅ Hive-style directories | ✅ Hive-style directories | ✅ Full |
 | Partition pruning (read) | ✅ Full | ✅ Via partition values in stats | ✅ Via predicate-based partition pruning | ✅ Full |
@@ -58,7 +58,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Schema Evolution
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Add column | ✅ Full | ✅ `missing_columns="insert"` fills NULLs | ✅ NULL fill for missing columns | ✅ Full |
 | Drop column | ✅ Full | ✅ `extra_columns="ignore"` | ✅ Skip columns not in schema | ✅ Full |
@@ -69,7 +69,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Time Travel
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Snapshot version-based | ✅ `AT (VERSION => n)` | ✅ `snapshot_version=n` | ✅ `snapshot_version=n` | ✅ Full |
 | Timestamp-based | ✅ `AT (TIMESTAMP => ts)` | ✅ `snapshot_time=ts` | ✅ `snapshot_time=ts` | ✅ Full |
@@ -77,7 +77,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Data Inlining
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Inline small inserts | ✅ Automatic (configurable threshold) | ✅ `data_inlining_row_limit` | ✅ `data_inlining_row_limit` | ✅ Full |
 | Read inlined data | ✅ Transparent | ✅ Transparent | ✅ Transparent | ✅ Full |
@@ -86,7 +86,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Statistics
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | File-level column stats (min/max/null_count) | ✅ Full | ✅ Written on insert | ✅ Written on insert | ✅ Full |
 | Table-level column stats | ✅ Full | ✅ Written on insert | ✅ Written on insert | ✅ Full |
@@ -96,34 +96,34 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Predicate Pushdown
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Filter pushdown to Parquet scan | ✅ Full (DuckDB optimizer) | ✅ Full (Polars optimizer) | ❌ No lazy evaluation | ⚠️ Partial |
 | Projection pushdown | ✅ Full | ✅ Full (Polars optimizer) | ✅ Via `columns=` parameter | ✅ Full |
 
 ### Delete Files
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Iceberg position-delete format | ✅ Full | ✅ `_deletion_files` in scan_parquet | ✅ Manual position filtering | ✅ Full |
 | Cumulative delete files | ✅ Full | ✅ On overwrite (cumulative rewrite) | ✅ On overwrite (cumulative rewrite) | ✅ Full |
 
 ### Sort Keys
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Sort keys (SET/RESET SORTED BY) | ✅ ASC/DESC, NULLS_FIRST/LAST | ✅ `alter_ducklake_set_sort_keys()` / `reset` | ✅ `alter_ducklake_set_sort_keys()` / `reset` | ✅ Full |
 
 ### Encryption
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Parquet file encryption | ✅ Via `encryption_key` in metadata | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
 | Encryption key management | ✅ Per-file encryption_key column | ❌ Not implemented | ❌ Not implemented | ❌ Missing |
 
 ### Column Mapping
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | field_id-based mapping | ✅ Full (Parquet field_ids) | ⚠️ Read: uses history; Write: map_by_name | ⚠️ Read: field_id + name fallback | ⚠️ Partial |
 | map_by_name mapping | ✅ Full | ✅ Registered on every write | ✅ Registered on every write | ✅ Full |
@@ -132,7 +132,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Data Types
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Integer types (INT8–INT64, UINT8–UINT64) | ✅ | ✅ | ✅ | ✅ Full |
 | Float types (FLOAT, DOUBLE) | ✅ | ✅ | ✅ | ✅ Full |
@@ -159,7 +159,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Metadata Backends
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | DuckDB (native .ducklake) | ✅ Primary | ✅ Read via sqlite3 (same format) | ✅ Read via sqlite3 | ✅ Full |
 | SQLite | ✅ Via sqlite extension | ✅ Via Python sqlite3 | ✅ Via Python sqlite3 | ✅ Full |
@@ -168,7 +168,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Catalog API
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | `ducklake_snapshots()` | ✅ | ✅ `DuckLakeCatalog.snapshots()` | ✅ `DuckLakeCatalog.snapshots()` | ✅ Full |
 | `ducklake_current_snapshot()` | ✅ | ✅ `.current_snapshot()` | ✅ `.current_snapshot()` | ✅ Full |
@@ -184,7 +184,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Maintenance
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | EXPIRE SNAPSHOTS | ✅ `CALL ducklake_expire_snapshots()` | ✅ `expire_snapshots()` | ✅ `expire_snapshots()` | ✅ Full |
 | VACUUM | ✅ `CALL ducklake_vacuum()` | ✅ `vacuum_ducklake()` | ✅ `vacuum_ducklake()` | ✅ Full |
@@ -192,7 +192,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Interoperability
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Write with DuckDB → read with us | ✅ N/A | ✅ Full (tested extensively) | ✅ Full (tested extensively) | ✅ Full |
 | Write with us → read with DuckDB | ✅ N/A | ✅ Full (map_by_name + field_id) | ✅ Full (map_by_name + field_id) | ✅ Full |
@@ -200,7 +200,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 ### Other
 
-| Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
+| Feature | DuckDB ducklake | ducklake-dataframe | ducklake-pandas | Status |
 |---|---|---|---|---|
 | Author / commit message metadata | ✅ `ducklake_snapshot_changes` | ✅ `author=`, `commit_message=` | ✅ `author=`, `commit_message=` | ✅ Full |
 | Concurrent writes (transactions) | ✅ DuckDB transaction isolation | ❌ No conflict detection | ❌ No conflict detection | ❌ Missing |

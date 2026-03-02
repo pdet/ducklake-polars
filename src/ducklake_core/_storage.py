@@ -33,7 +33,7 @@ def _get_fs(path: str):
     except ImportError as exc:
         msg = (
             f"fsspec is required to access remote paths ({path!r}). "
-            "Install it with: pip install 'ducklake-polars[cloud]'"
+            "Install it with: pip install 'ducklake-dataframe[cloud]'"
         )
         raise ImportError(msg) from exc
     protocol = path.split("://")[0]
