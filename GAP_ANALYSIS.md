@@ -112,7 +112,7 @@ _Generated: 2026-03-01 · DuckLake spec version: 0.3_
 
 | Feature | DuckDB ducklake | ducklake-polars | ducklake-pandas | Status |
 |---|---|---|---|---|
-| Sort keys on write | ✅ Sorted output by configured keys | ✅ `alter_ducklake_set_sort_keys()` | ✅ `alter_ducklake_set_sort_keys()` | ✅ Full |
+| Sort keys (SET/RESET SORTED BY) | ✅ ASC/DESC, NULLS_FIRST/LAST | ✅ `alter_ducklake_set_sort_keys()` / `reset` | ✅ `alter_ducklake_set_sort_keys()` / `reset` | ✅ Full |
 
 ### Encryption
 
