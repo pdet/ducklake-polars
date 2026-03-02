@@ -227,6 +227,7 @@ def read_ducklake(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    import ducklake_core._storage as storage
     from ducklake_core._catalog import DuckLakeCatalogReader, ColumnHistoryEntry
     from ducklake_core._schema import resolve_column_type
 
@@ -337,13 +338,13 @@ def read_ducklake(
             ):
                 continue
             file_path = reader.resolve_data_file_path(f.path, f.path_is_relative, table_info)
-            tbl = pq.ParquetFile(file_path).read()
+            tbl = storage.read_parquet(file_path)
 
             # Apply delete files (Iceberg position-delete format)
             if f.data_file_id in del_map:
                 all_positions: list[int] = []
                 for del_path, partial_max in del_map[f.data_file_id]:
-                    del_tbl = pq.read_table(del_path)
+                    del_tbl = storage.read_parquet(del_path)
                     # Filter cumulative delete files when time-traveling.
                     # v0.4 catalogs tag each position with the snapshot that
                     # deleted it via _ducklake_internal_snapshot_id.

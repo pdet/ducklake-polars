@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+import ducklake_core._storage as storage
 from ducklake_polars._catalog import DuckLakeCatalogReader
 from ducklake_polars._schema import resolve_column_type
 from ducklake_polars._stats import build_table_statistics
@@ -53,7 +54,7 @@ def _filter_delete_file_by_snapshot(path: str, snapshot_id: int) -> str | None:
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    tbl = pq.read_table(path)
+    tbl = storage.read_parquet(path)
     if "_ducklake_internal_snapshot_id" not in tbl.column_names:
         return path
 

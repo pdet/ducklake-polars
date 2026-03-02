@@ -40,6 +40,10 @@ Issues = "https://github.com/pdet/ducklake-polars/issues"
 [project.optional-dependencies]
 postgres = ["psycopg2-binary>=2.9"]
 pandas = ["pandas>=1.5", "pyarrow>=10.0"]
+cloud = ["fsspec>=2023.1"]
+s3 = ["fsspec>=2023.1", "s3fs"]
+gcs = ["fsspec>=2023.1", "gcsfs"]
+azure = ["fsspec>=2023.1", "adlfs"]
 dev = [
     "pytest>=7.0",
     "pytest-xdist",

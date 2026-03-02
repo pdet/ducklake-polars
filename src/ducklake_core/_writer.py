@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import struct
 import time
 import uuid
 from collections import OrderedDict
@@ -16,6 +15,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+import ducklake_core._storage as storage
 from ducklake_core._backend import PostgreSQLBackend, SQLiteBackend, create_backend
 from ducklake_core._schema import arrow_type_to_duckdb, duckdb_type_to_arrow
 
@@ -56,11 +56,8 @@ def _decode_dictionary_columns(table: pa.Table) -> pa.Table:
 def _read_parquet_footer_size(path: str) -> int:
     """Read the Parquet footer size from a file."""
     try:
-        with open(path, "rb") as f:
-            f.seek(-8, 2)
-            footer_len = struct.unpack("<I", f.read(4))[0]
-        return footer_len
-    except (OSError, struct.error):
+        return storage.read_parquet_footer_size(path)
+    except Exception:
         return 0
 
 
@@ -1019,17 +1016,17 @@ class DuckLakeCatalogWriter:
             else:
                 base = self.data_path
                 if schema_path_rel:
-                    base = os.path.join(base, schema_path)
+                    base = storage.join_path(base, schema_path)
                 else:
                     base = schema_path
-                base = os.path.join(base, table_path)
-                os.makedirs(base, exist_ok=True)
+                base = storage.join_path(base, table_path)
+                storage.makedirs(base, exist_ok=True)
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
-                file_path = os.path.join(base, file_name)
-                pq.write_table(df, file_path)
+                file_path = storage.join_path(base, file_name)
+                storage.write_parquet(df, file_path)
 
-                file_size = os.path.getsize(file_path)
+                file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
 
                 mapping_id = self._register_name_mapping(table_id, top_level_cols)
@@ -1412,11 +1409,11 @@ class DuckLakeCatalogWriter:
 
         base = self.data_path
         if schema_path_rel:
-            base = os.path.join(base, schema_path)
+            base = storage.join_path(base, schema_path)
         else:
             base = schema_path
         if table_path_rel:
-            base = os.path.join(base, table_path)
+            base = storage.join_path(base, table_path)
         else:
             base = table_path
 
@@ -1429,16 +1426,16 @@ class DuckLakeCatalogWriter:
                 snap_id, schema_ver, next_cat_id, next_file_id,
             )
 
-        os.makedirs(base, exist_ok=True)
+        storage.makedirs(base, exist_ok=True)
 
         # Sort by sort keys if defined
         df = self._maybe_sort(df, table_id, snap_id)
 
         file_name = f"ducklake-{_uuid7()}.parquet"
-        file_path = os.path.join(base, file_name)
-        pq.write_table(df, file_path)
+        file_path = storage.join_path(base, file_name)
+        storage.write_parquet(df, file_path)
 
-        file_size = os.path.getsize(file_path)
+        file_size = storage.get_file_size(file_path)
         footer_size = _read_parquet_footer_size(file_path)
 
         existing_stats = self._get_table_stats(table_id)
@@ -1557,14 +1554,14 @@ class DuckLakeCatalogWriter:
 
             partition_values = [str(v) for v in group_key]
             hive_subdir = self._build_hive_path(part_col_names, partition_values)
-            partition_dir = os.path.join(base_dir, hive_subdir)
-            os.makedirs(partition_dir, exist_ok=True)
+            partition_dir = storage.join_path(base_dir, hive_subdir)
+            storage.makedirs(partition_dir, exist_ok=True)
 
             file_name = f"ducklake-{_uuid7()}.parquet"
-            file_path = os.path.join(partition_dir, file_name)
-            pq.write_table(group_df, file_path)
+            file_path = storage.join_path(partition_dir, file_name)
+            storage.write_parquet(group_df, file_path)
 
-            file_size = os.path.getsize(file_path)
+            file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
             record_count = len(group_df)
 
@@ -1645,14 +1642,14 @@ class DuckLakeCatalogWriter:
 
         base = self.data_path
         if schema_path_rel:
-            base = os.path.join(base, schema_path)
+            base = storage.join_path(base, schema_path)
         else:
             base = schema_path
         if table_path_rel:
-            base = os.path.join(base, table_path)
+            base = storage.join_path(base, table_path)
         else:
             base = table_path
-        os.makedirs(base, exist_ok=True)
+        storage.makedirs(base, exist_ok=True)
 
         record_count = len(df)
 
@@ -1716,10 +1713,10 @@ class DuckLakeCatalogWriter:
             df = self._maybe_sort(df, table_id, snap_id)
 
             file_name = f"ducklake-{_uuid7()}.parquet"
-            file_path = os.path.join(base, file_name)
-            pq.write_table(df, file_path)
+            file_path = storage.join_path(base, file_name)
+            storage.write_parquet(df, file_path)
 
-            file_size = os.path.getsize(file_path)
+            file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
 
             mapping_id = self._register_name_mapping(table_id, columns)
@@ -1828,14 +1825,14 @@ class DuckLakeCatalogWriter:
 
             partition_values = [str(v) for v in group_key]
             hive_subdir = self._build_hive_path(part_col_names, partition_values)
-            partition_dir = os.path.join(base_dir, hive_subdir)
-            os.makedirs(partition_dir, exist_ok=True)
+            partition_dir = storage.join_path(base_dir, hive_subdir)
+            storage.makedirs(partition_dir, exist_ok=True)
 
             file_name = f"ducklake-{_uuid7()}.parquet"
-            file_path = os.path.join(partition_dir, file_name)
-            pq.write_table(group_df, file_path)
+            file_path = storage.join_path(partition_dir, file_name)
+            storage.write_parquet(group_df, file_path)
 
-            file_size = os.path.getsize(file_path)
+            file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
             record_count = len(group_df)
             rel_path = f"{hive_subdir}/{file_name}"
@@ -1928,14 +1925,14 @@ class DuckLakeCatalogWriter:
             return file_path
         base = self.data_path
         if schema_path_rel:
-            base = os.path.join(base, schema_path)
+            base = storage.join_path(base, schema_path)
         else:
             base = schema_path
         if table_path_rel:
-            base = os.path.join(base, table_path)
+            base = storage.join_path(base, table_path)
         else:
             base = table_path
-        return os.path.join(base, file_path)
+        return storage.join_path(base, file_path)
 
     def _get_active_delete_positions(
         self,
@@ -2037,10 +2034,10 @@ class DuckLakeCatalogWriter:
             "pos": pa.array(all_positions, type=pa.int64()),
         })
         delete_file_name = f"ducklake-{_uuid7()}-delete.parquet"
-        delete_file_path = os.path.join(base_dir, delete_file_name)
-        pq.write_table(delete_table, delete_file_path)
+        delete_file_path = storage.join_path(base_dir, delete_file_name)
+        storage.write_parquet(delete_table, delete_file_path)
 
-        delete_file_size = os.path.getsize(delete_file_path)
+        delete_file_size = storage.get_file_size(delete_file_path)
         delete_footer_size = _read_parquet_footer_size(delete_file_path)
 
         con.execute(
@@ -2092,14 +2089,14 @@ class DuckLakeCatalogWriter:
         if data_files:
             base = self.data_path
             if schema_path_rel:
-                base = os.path.join(base, schema_path)
+                base = storage.join_path(base, schema_path)
             else:
                 base = schema_path
             if table_path_rel:
-                base = os.path.join(base, table_path)
+                base = storage.join_path(base, table_path)
             else:
                 base = table_path
-            os.makedirs(base, exist_ok=True)
+            storage.makedirs(base, exist_ok=True)
 
             for data_file_id, rel_path, path_is_rel, record_count, row_id_start in data_files:
                 abs_path = self._resolve_file_path(
@@ -2135,11 +2132,11 @@ class DuckLakeCatalogWriter:
         if pending_deletes:
             base = self.data_path
             if schema_path_rel:
-                base = os.path.join(base, schema_path)
+                base = storage.join_path(base, schema_path)
             else:
                 base = schema_path
             if table_path_rel:
-                base = os.path.join(base, table_path)
+                base = storage.join_path(base, table_path)
             else:
                 base = table_path
 
@@ -2257,14 +2254,14 @@ class DuckLakeCatalogWriter:
 
         base = self.data_path
         if schema_path_rel:
-            base = os.path.join(base, schema_path)
+            base = storage.join_path(base, schema_path)
         else:
             base = schema_path
         if table_path_rel:
-            base = os.path.join(base, table_path)
+            base = storage.join_path(base, table_path)
         else:
             base = table_path
-        os.makedirs(base, exist_ok=True)
+        storage.makedirs(base, exist_ok=True)
 
         pending_deletes: list[tuple[int, str, list[int]]] = []
         matched_dfs: list[pa.Table] = []
@@ -2378,14 +2375,14 @@ class DuckLakeCatalogWriter:
 
                 partition_values = [str(v) for v in group_key]
                 hive_subdir = self._build_hive_path(part_col_names, partition_values)
-                partition_dir = os.path.join(base, hive_subdir)
-                os.makedirs(partition_dir, exist_ok=True)
+                partition_dir = storage.join_path(base, hive_subdir)
+                storage.makedirs(partition_dir, exist_ok=True)
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
-                file_path = os.path.join(partition_dir, file_name)
-                pq.write_table(group_df, file_path)
+                file_path = storage.join_path(partition_dir, file_name)
+                storage.write_parquet(group_df, file_path)
 
-                file_size = os.path.getsize(file_path)
+                file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
                 record_count = len(group_df)
                 rel_path = f"{hive_subdir}/{file_name}"
@@ -2413,10 +2410,10 @@ class DuckLakeCatalogWriter:
                 updated_df = self._sort_table_by_keys(updated_df, update_sort_keys)
 
             file_name = f"ducklake-{_uuid7()}.parquet"
-            file_path = os.path.join(base, file_name)
-            pq.write_table(updated_df, file_path)
+            file_path = storage.join_path(base, file_name)
+            storage.write_parquet(updated_df, file_path)
 
-            file_size = os.path.getsize(file_path)
+            file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
 
             self._register_data_file(
@@ -2692,14 +2689,14 @@ class DuckLakeCatalogWriter:
         # ----------------------------------------------------------
         base = self.data_path
         if schema_path_rel:
-            base = os.path.join(base, schema_path)
+            base = storage.join_path(base, schema_path)
         else:
             base = schema_path
         if table_path_rel:
-            base = os.path.join(base, table_path)
+            base = storage.join_path(base, table_path)
         else:
             base = table_path
-        os.makedirs(base, exist_ok=True)
+        storage.makedirs(base, exist_ok=True)
 
         # ----------------------------------------------------------
         # Phase 6: allocate IDs and create snapshot
@@ -2775,14 +2772,14 @@ class DuckLakeCatalogWriter:
                 hive_subdir = self._build_hive_path(
                     part_col_names, partition_values,
                 )
-                partition_dir = os.path.join(base, hive_subdir)
-                os.makedirs(partition_dir, exist_ok=True)
+                partition_dir = storage.join_path(base, hive_subdir)
+                storage.makedirs(partition_dir, exist_ok=True)
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
-                file_path = os.path.join(partition_dir, file_name)
-                pq.write_table(gdf, file_path)
+                file_path = storage.join_path(partition_dir, file_name)
+                storage.write_parquet(gdf, file_path)
 
-                file_size = os.path.getsize(file_path)
+                file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
                 rel_path = f"{hive_subdir}/{file_name}"
 
@@ -2811,10 +2808,10 @@ class DuckLakeCatalogWriter:
                 insert_df = self._sort_table_by_keys(insert_df, merge_sort_keys)
 
             file_name = f"ducklake-{_uuid7()}.parquet"
-            file_path = os.path.join(base, file_name)
-            pq.write_table(insert_df, file_path)
+            file_path = storage.join_path(base, file_name)
+            storage.write_parquet(insert_df, file_path)
 
-            file_size = os.path.getsize(file_path)
+            file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
 
             self._register_data_file(

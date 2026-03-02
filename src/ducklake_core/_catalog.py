@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import ducklake_core._storage as storage
 from ducklake_core._backend import create_backend
 
 import pyarrow as pa
@@ -240,16 +241,16 @@ class DuckLakeCatalogReader:
         base = self.data_path
 
         if table.schema_path_is_relative:
-            base = os.path.join(base, table.schema_path)
+            base = storage.join_path(base, table.schema_path)
         else:
             base = table.schema_path
 
         if table.table_path_is_relative:
-            base = os.path.join(base, table.table_path)
+            base = storage.join_path(base, table.table_path)
         else:
             base = table.table_path
 
-        return os.path.join(base, file_path)
+        return storage.join_path(base, file_path)
 
     def get_current_snapshot(self) -> SnapshotInfo:
         """Get the current (latest) snapshot."""
