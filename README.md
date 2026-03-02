@@ -4,11 +4,9 @@
 
 Pure-Python [Polars](https://pola.rs/) and [Pandas](https://pandas.pydata.org/) integration for [DuckLake](https://ducklake.select/) catalogs — both read and write.
 
-Reads and writes DuckLake metadata directly from SQLite or PostgreSQL and scans the underlying Parquet data files through Polars' native Parquet reader or PyArrow. **No DuckDB runtime dependency.** With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics.
+Reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through Polars' native Parquet reader or PyArrow. **No DuckDB runtime dependency.** With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning.
 
 ## Architecture
-
-The project uses a three-layer architecture with a shared core:
 
 ```
 ┌─────────────────┐  ┌─────────────────┐
@@ -22,9 +20,11 @@ The project uses a three-layer architecture with a shared core:
          └─────────────────┘
 ```
 
-- **`ducklake_core`** — All catalog I/O, write operations, schema mapping, and backend adapters. Uses [PyArrow](https://arrow.apache.org/docs/python/) as the internal data representation. Both Polars and Pandas wrappers delegate to this shared core for writes, DDL, and catalog inspection.
-- **`ducklake_polars`** — Polars-specific reader (lazy `scan_parquet` via the `PythonDatasetProvider` interface), plus a thin API layer that converts between Polars types and Arrow.
-- **`ducklake_pandas`** — Pandas-specific reader (eager reads via PyArrow → Pandas conversion), plus a thin API layer that converts between Pandas types and Arrow.
+- **`ducklake_core`** — All catalog I/O, write operations, schema mapping, and backend adapters. Uses [PyArrow](https://arrow.apache.org/docs/python/) as the internal data representation.
+- **`ducklake_polars`** — Polars-specific reader (lazy `scan_parquet` via `PythonDatasetProvider`), plus a thin API that converts between Polars types and Arrow.
+- **`ducklake_pandas`** — Pandas-specific reader (eager via PyArrow → Pandas conversion), plus a thin API that converts between Pandas types and Arrow.
+
+Both wrappers delegate to the shared core for writes, DDL, catalog inspection, and maintenance operations.
 
 ## Installation
 
@@ -37,316 +37,347 @@ pip install ducklake-polars[postgres]
 pip install ducklake-pandas[postgres]
 ```
 
-Runtime dependencies: `polars >= 1.0` and/or `pandas`, plus `pyarrow` (used by the core engine for Parquet I/O, schema mapping, and data processing). SQLite catalogs use Python's built-in `sqlite3`. PostgreSQL catalogs require the `postgres` extra (adds `psycopg2`).
+**Dependencies:** `polars >= 1.0` and/or `pandas >= 1.5`, plus `pyarrow >= 10.0`. SQLite catalogs use Python's built-in `sqlite3`. PostgreSQL catalogs require `psycopg2` (via the `[postgres]` extra). DuckDB `.ducklake` files are also SQLite-based and work out of the box.
 
-## Quick start
+## Tutorial
 
-### Reading data — Polars
-
-```python
-import polars as pl
-from ducklake_polars import scan_ducklake, read_ducklake
-
-# Eager read
-df = read_ducklake("catalog.ducklake", "my_table")
-
-# Lazy scan (recommended for large tables)
-lf = scan_ducklake("catalog.ducklake", "my_table")
-result = lf.filter(pl.col("x") > 100).select("x", "y").collect()
-
-# Time travel
-df = read_ducklake("catalog.ducklake", "my_table", snapshot_version=3)
-df = read_ducklake("catalog.ducklake", "my_table", snapshot_time="2025-01-15T10:30:00")
-
-# PostgreSQL-backed catalog
-df = read_ducklake("postgresql://user:pass@localhost/mydb", "my_table")
-```
-
-### Reading data — Pandas
-
-```python
-from ducklake_pandas import read_ducklake
-
-# Eager read
-df = read_ducklake("catalog.ducklake", "my_table")
-
-# Column selection
-df = read_ducklake("catalog.ducklake", "my_table", columns=["id", "name"])
-
-# Time travel
-df = read_ducklake("catalog.ducklake", "my_table", snapshot_version=3)
-
-# PostgreSQL-backed catalog
-df = read_ducklake("postgresql://user:pass@localhost/mydb", "my_table")
-```
-
-### Writing data — Polars
+### 1. Create a catalog and write data
 
 ```python
 import polars as pl
 from ducklake_polars import write_ducklake
 
-df = pl.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Carol"]})
-
-# Create and populate a new table
+# Create a new table (mode="error" fails if it already exists)
+df = pl.DataFrame({
+    "id": [1, 2, 3],
+    "name": ["Alice", "Bob", "Carol"],
+    "region": ["US", "EU", "US"],
+})
 write_ducklake(df, "catalog.ducklake", "users", mode="error")
 
-# Append rows
-write_ducklake(new_rows, "catalog.ducklake", "users", mode="append")
-
-# Overwrite all data
-write_ducklake(df, "catalog.ducklake", "users", mode="overwrite")
+# Append more rows
+more = pl.DataFrame({"id": [4, 5], "name": ["Dave", "Eve"], "region": ["EU", "US"]})
+write_ducklake(more, "catalog.ducklake", "users", mode="append")
 ```
 
-### Writing data — Pandas
+### 2. Query with lazy evaluation
 
 ```python
-import pandas as pd
-from ducklake_pandas import write_ducklake
+from ducklake_polars import scan_ducklake
 
-df = pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Carol"]})
-
-# Create and populate a new table
-write_ducklake(df, "catalog.ducklake", "users", mode="error")
-
-# Append rows
-write_ducklake(new_rows, "catalog.ducklake", "users", mode="append")
-
-# Overwrite all data
-write_ducklake(df, "catalog.ducklake", "users", mode="overwrite")
+# Lazy scan — predicates and projections are pushed down
+lf = scan_ducklake("catalog.ducklake", "users")
+result = (
+    lf.filter(pl.col("region") == "US")
+      .select("id", "name")
+      .collect()
+)
+print(result)
+# shape: (3, 2)
+# ┌─────┬───────┐
+# │ id  ┆ name  │
+# │ --- ┆ ---   │
+# │ i64 ┆ str   │
+# ╞═════╪═══════╡
+# │ 1   ┆ Alice │
+# │ 3   ┆ Carol │
+# │ 5   ┆ Eve   │
+# └─────┴───────┘
 ```
 
-### DDL operations
+### 3. Evolve the schema
 
 ```python
 from ducklake_polars import (
-    create_ducklake_table,
     alter_ducklake_add_column,
-    alter_ducklake_drop_column,
     alter_ducklake_rename_column,
-    alter_ducklake_set_partitioned_by,
-    drop_ducklake_table,
-    rename_ducklake_table,
-    create_ducklake_schema,
-    drop_ducklake_schema,
-    create_ducklake_view,
-    drop_ducklake_view,
+    alter_ducklake_set_type,
 )
 
-# Schema management
-create_ducklake_schema("catalog.ducklake", "analytics")
-drop_ducklake_schema("catalog.ducklake", "analytics", cascade=True)
-
-# Table management
-create_ducklake_table("catalog.ducklake", "events", {"ts": pl.Datetime("us"), "value": pl.Float64})
-rename_ducklake_table("catalog.ducklake", "events", "event_log")
-drop_ducklake_table("catalog.ducklake", "event_log")
-
-# Column management
+# Add a column — existing rows get NULL
 alter_ducklake_add_column("catalog.ducklake", "users", "email", pl.String)
-alter_ducklake_rename_column("catalog.ducklake", "users", "email", "contact_email")
-alter_ducklake_drop_column("catalog.ducklake", "users", "contact_email")
 
-# Partitioning
-alter_ducklake_set_partitioned_by("catalog.ducklake", "events", ["region", "date"])
+# Rename a column — old Parquet files are reconciled transparently
+alter_ducklake_rename_column("catalog.ducklake", "users", "email", "contact")
 
-# Views
-create_ducklake_view("catalog.ducklake", "active_users", "SELECT * FROM users WHERE active = true")
-drop_ducklake_view("catalog.ducklake", "active_users")
+# Change a column's type — reader casts old data on the fly
+alter_ducklake_set_type("catalog.ducklake", "users", "id", "BIGINT")
 ```
 
-### DML operations — Polars
+### 4. Delete, update, merge
 
 ```python
 from ducklake_polars import delete_ducklake, update_ducklake, merge_ducklake
 
-# Delete rows matching a predicate
-deleted = delete_ducklake("catalog.ducklake", "users", pl.col("active") == False)
+# Delete rows
+deleted = delete_ducklake("catalog.ducklake", "users", pl.col("id") == 2)
 
 # Update rows
 updated = update_ducklake(
     "catalog.ducklake", "users",
-    updates={"status": "inactive"},
-    predicate=pl.col("last_login") < "2024-01-01",
+    updates={"region": "APAC"},
+    predicate=pl.col("name") == "Eve",
 )
 
-# Merge (upsert)
+# Merge (upsert) — atomic delete + insert in one snapshot
+source = pl.DataFrame({"id": [1, 6], "name": ["Alice2", "Frank"], "region": ["US", "EU"]})
 rows_updated, rows_inserted = merge_ducklake(
-    "catalog.ducklake", "users", source_df, on="id",
+    "catalog.ducklake", "users", source, on="id",
     when_matched_update=True,
     when_not_matched_insert=True,
 )
 ```
 
-### DML operations — Pandas
+### 5. Time travel
 
 ```python
-from ducklake_pandas import delete_ducklake, update_ducklake, merge_ducklake
+from ducklake_polars import read_ducklake
 
-# Delete rows matching a predicate (predicate is a callable)
-deleted = delete_ducklake(
-    "catalog.ducklake", "users",
-    lambda df: df["active"] == False,
-)
+# Read at a specific snapshot version
+df_v1 = read_ducklake("catalog.ducklake", "users", snapshot_version=1)
 
-# Update rows
-updated = update_ducklake(
-    "catalog.ducklake", "users",
-    updates={"status": "inactive"},
-    predicate=lambda df: df["last_login"] < "2024-01-01",
-)
-
-# Merge (upsert)
-rows_updated, rows_inserted = merge_ducklake(
-    "catalog.ducklake", "users", source_df, on="id",
-    when_matched_update=True,
-    when_not_matched_insert=True,
-)
+# Read at a specific timestamp
+df_ts = read_ducklake("catalog.ducklake", "users", snapshot_time="2025-06-15T10:30:00")
 ```
 
-### Catalog inspection
+### 6. Inspect the catalog
 
 ```python
 from ducklake_polars import DuckLakeCatalog
 
 catalog = DuckLakeCatalog("catalog.ducklake")
 
-catalog.snapshots()           # All snapshots
-catalog.current_snapshot()    # Latest snapshot ID
-catalog.list_schemas()        # All schemas
-catalog.list_tables()         # Tables in a schema
-catalog.table_info()          # Per-table storage metadata
-catalog.list_files("users")   # Data files and delete files
-catalog.options()             # Catalog key-value metadata
-catalog.settings()            # Backend type and data path
-
-# Change data feed
-catalog.table_insertions("users", start_version=1, end_version=5)
-catalog.table_deletions("users", start_version=1, end_version=5)
-catalog.table_changes("users", start_version=1, end_version=5)
+catalog.snapshots()                                          # All snapshots
+catalog.current_snapshot()                                   # Latest snapshot ID
+catalog.table_info()                                         # Per-table file/size stats
+catalog.list_files("users")                                  # Data + delete files
+catalog.list_schemas()                                       # All schemas
+catalog.list_tables()                                        # Tables in default schema
+catalog.table_changes("users", start_version=1, end_version=5)  # Change data feed
 ```
+
+### 7. DuckDB interoperability
+
+Catalogs are fully interoperable — create with DuckDB, read with ducklake-polars, or vice versa:
+
+```python
+import duckdb
+
+# DuckDB writes data
+con = duckdb.connect()
+con.execute("INSTALL ducklake; LOAD ducklake")
+con.execute("ATTACH 'ducklake:sqlite:catalog.ducklake' AS lake (DATA_PATH 'data/')")
+con.execute("CREATE TABLE lake.events (ts TIMESTAMP, value DOUBLE)")
+con.execute("INSERT INTO lake.events VALUES ('2025-01-01', 42.0)")
+con.close()
+
+# Polars reads it — no DuckDB needed at runtime
+from ducklake_polars import scan_ducklake
+lf = scan_ducklake("catalog.ducklake", "events")
+print(lf.collect())
+```
+
+The reverse also works: write with ducklake-polars, query with DuckDB SQL.
+
+## API Reference
+
+### Read operations
+
+| Function | Description |
+|---|---|
+| `scan_ducklake(path, table, ...)` | Polars-only. Returns a `LazyFrame` with full predicate/projection pushdown and file pruning. |
+| `read_ducklake(path, table, ...)` | Eager read into `DataFrame` (Polars) or `pd.DataFrame` (Pandas). Supports `columns=` for projection. |
+
+Both support `snapshot_version=`, `snapshot_time=`, `schema=`, and `data_path=` overrides.
+
+Pandas `read_ducklake` also accepts `predicate=` (a callable `df -> Series[bool]`) for partition and stats-based file pruning.
+
+### Write operations
+
+| Function | Description |
+|---|---|
+| `write_ducklake(df, path, table, mode=...)` | Insert data. Modes: `"error"` (default), `"append"`, `"overwrite"`. |
+| `create_table_as_ducklake(df, path, table)` | Create table + insert data in a single atomic snapshot. |
+| `delete_ducklake(path, table, predicate)` | Delete matching rows. Polars: `pl.Expr`; Pandas: callable or `True`. |
+| `update_ducklake(path, table, updates, predicate)` | Atomic delete + insert for matched rows. |
+| `merge_ducklake(path, table, source_df, on=...)` | Upsert with `when_matched_update` and `when_not_matched_insert`. |
+
+All write operations support `author=` and `commit_message=` for snapshot metadata, and `data_inlining_row_limit=` for small-data inlining.
+
+### DDL operations
+
+| Function | Description |
+|---|---|
+| `create_ducklake_table(path, table, schema)` | Create an empty table. Polars: `pl.Schema`; Pandas: `dict[str, str]` of DuckDB types. |
+| `drop_ducklake_table(path, table)` | Drop a table. |
+| `rename_ducklake_table(path, old, new)` | Rename a table. |
+| `alter_ducklake_add_column(path, table, col, dtype)` | Add a column (with optional `default=`). |
+| `alter_ducklake_drop_column(path, table, col)` | Drop a column. |
+| `alter_ducklake_rename_column(path, table, old, new)` | Rename a column. |
+| `alter_ducklake_set_type(path, table, col, new_type)` | Change column type (DuckDB type string). |
+| `alter_ducklake_set_partitioned_by(path, table, cols)` | Set identity-transform partitioning. |
+| `alter_ducklake_set_sort_keys(path, table, keys)` | Set sort keys (`"col"`, `("col", "DESC")`, or `("col", "ASC", "NULLS_FIRST")`). |
+| `alter_ducklake_reset_sort_keys(path, table)` | Remove sort keys. |
+| `create_ducklake_schema(path, name)` | Create a schema. |
+| `drop_ducklake_schema(path, name, cascade=)` | Drop a schema (with optional `cascade=True`). |
+| `create_ducklake_view(path, name, sql, or_replace=)` | Create a view. |
+| `drop_ducklake_view(path, name)` | Drop a view. |
+| `set_ducklake_table_tag(path, table, key, value)` | Set a table tag (key-value metadata). |
+| `set_ducklake_column_tag(path, table, col, key, value)` | Set a column tag. |
+| `delete_ducklake_table_tag(path, table, key)` | Remove a table tag. |
+| `delete_ducklake_column_tag(path, table, col, key)` | Remove a column tag. |
+
+### Catalog inspection
+
+```python
+from ducklake_polars import DuckLakeCatalog  # or ducklake_pandas
+
+catalog = DuckLakeCatalog("catalog.ducklake")
+```
+
+| Method | Description |
+|---|---|
+| `.snapshots()` | All snapshots with `snapshot_id`, `snapshot_time`, `schema_version`. |
+| `.current_snapshot()` | Latest snapshot ID (int). |
+| `.list_schemas()` | All schemas. |
+| `.list_tables(schema=)` | All tables in a schema. |
+| `.table_info(schema=)` | Per-table storage stats (file count, size, delete files). |
+| `.list_files(table, schema=)` | Data files and delete files for a table. |
+| `.options()` | Catalog key-value metadata. |
+| `.settings()` | Backend type and data path. |
+| `.table_tags(table)` | Table-level tags. |
+| `.column_tags(table, column)` | Column-level tags. |
+| `.sort_keys(table)` | Active sort keys with direction and null ordering. |
+| `.table_insertions(table, start, end)` | Rows inserted between snapshots. |
+| `.table_deletions(table, start, end)` | Rows deleted between snapshots. |
+| `.table_changes(table, start, end)` | Full change data feed (`insert`, `delete`, `update_preimage`, `update_postimage`). |
+
+Polars wrapper returns `pl.DataFrame`; Pandas wrapper returns `pd.DataFrame`; core returns `pa.Table`.
 
 ### Maintenance
 
-```python
-from ducklake_polars import expire_snapshots, vacuum_ducklake
-
-# Expire old snapshots (metadata cleanup)
-expired = expire_snapshots("catalog.ducklake", keep_last_n=10)
-
-# Delete orphaned Parquet files (disk cleanup)
-deleted = vacuum_ducklake("catalog.ducklake")
-```
+| Function | Description |
+|---|---|
+| `expire_snapshots(path, keep_last_n=)` | Remove old snapshot metadata. Also accepts `older_than_snapshot=`. |
+| `vacuum_ducklake(path)` | Delete orphaned Parquet files not referenced by the catalog. |
 
 ## Features
 
 ### Read path
-- **Lazy and eager reads** via `scan_ducklake()` / `read_ducklake()`
-- **Predicate and projection pushdown** through Polars' native optimizer
-- **File pruning** via column-level min/max statistics and partition values
-- **Time travel** by snapshot version or timestamp
-- **Delete file handling** via Polars' Iceberg-compatible positional deletes
-- **Schema evolution** — ADD COLUMN, DROP COLUMN, RENAME COLUMN all handled transparently
-- **Inlined data** — small tables stored directly in catalog metadata
-- **Partition pruning** for identity-transform partitions
-- **Column renames** — old Parquet files with old names seamlessly reconciled
+- **Lazy and eager reads** — `scan_ducklake()` (Polars LazyFrame) / `read_ducklake()` (eager)
+- **Predicate and projection pushdown** — through Polars' native optimizer; Pandas supports `columns=` and `predicate=`
+- **File pruning** — column-level min/max statistics and partition values
+- **Time travel** — by snapshot version or timestamp
+- **Delete file handling** — Iceberg-compatible positional deletes (cumulative delete files supported)
+- **Schema evolution** — ADD/DROP/RENAME COLUMN handled transparently across file versions
+- **Inlined data** — small tables stored directly in catalog metadata, read transparently
+- **Column renames** — old Parquet files with old column names seamlessly reconciled via column history
 
 ### Write path
 - **INSERT** — append, overwrite, or error-on-exists modes
-- **DELETE** — predicate-based row deletion with position-delete files
+- **DELETE** — predicate-based row deletion with Iceberg position-delete files
 - **UPDATE** — atomic delete + insert in a single snapshot
 - **MERGE** — upsert with configurable matched/unmatched behavior
 - **CREATE TABLE AS** — single-snapshot table creation with data
-- **Data inlining** — small inserts stored as rows in catalog metadata
+- **Data inlining** — small inserts stored as rows in catalog metadata (configurable threshold)
 - **Partitioned writes** — Hive-style directory layout per partition key
+- **Sort keys** — data sorted before writing Parquet for better row group statistics
+- **Author/commit metadata** — `author=` and `commit_message=` on all write operations
 
 ### DDL
 - **CREATE/DROP TABLE** with full snapshot versioning
 - **ADD/DROP/RENAME COLUMN** with schema evolution tracking
+- **SET TYPE** — column type changes tracked in schema history
 - **CREATE/DROP SCHEMA** with cascade support
 - **RENAME TABLE** preserving table identity
-- **SET PARTITIONED BY** for identity-transform partitioning
+- **SET/RESET PARTITIONED BY** — identity-transform partitioning
+- **SET/RESET SORTED BY** — with `ASC`/`DESC` and `NULLS_FIRST`/`NULLS_LAST`
 - **CREATE/DROP VIEW** with `OR REPLACE` support
+- **Tags** — key-value metadata on tables and columns (interoperable with DuckDB's `COMMENT ON`)
 
-### Catalog inspection
-- Snapshot history and time travel metadata
-- Per-table storage statistics (file counts, sizes)
-- Data file and delete file listing
-- Schema and table enumeration
-- Key-value catalog options
-- **Change data feed** — insertions, deletions, and update detection
+### Catalog backends
+- **SQLite** — Python stdlib `sqlite3` (zero dependency)
+- **DuckDB** — `.ducklake` files are SQLite-format, read via `sqlite3`
+- **PostgreSQL** — via `psycopg2` (optional `[postgres]` extra)
 
-### Maintenance
-- **expire_snapshots** — remove old snapshot metadata
-- **vacuum** — delete orphaned Parquet files
+Catalogs are fully interoperable with DuckDB's native DuckLake extension. Both DuckLake catalog format **v0.3** and **v0.4** are supported.
 
-### Backend support
-- **SQLite** — via Python stdlib `sqlite3` (zero-dependency)
-- **PostgreSQL** — via `psycopg2` (optional extra)
-- Full interoperability with DuckDB's DuckLake extension
-
-## DuckDB interoperability
-
-ducklake-polars produces catalogs that are fully interoperable with DuckDB's DuckLake extension. You can:
-
-- Create catalogs with DuckDB, read/write with ducklake-polars
-- Create catalogs with ducklake-polars, read/query with DuckDB
-- Mix operations freely — both tools read the same metadata format
-
-```python
-# Create catalog with DuckDB
-import duckdb
-con = duckdb.connect()
-con.execute("INSTALL ducklake; LOAD ducklake; INSTALL sqlite_scanner; LOAD sqlite_scanner")
-con.execute("ATTACH 'ducklake:sqlite:catalog.ducklake' AS lake (DATA_PATH 'data/')")
-con.execute("CREATE TABLE lake.users (id INTEGER, name VARCHAR)")
-con.execute("INSERT INTO lake.users VALUES (1, 'Alice'), (2, 'Bob')")
-con.close()
-
-# Read with ducklake-polars
-from ducklake_polars import read_ducklake
-df = read_ducklake("catalog.ducklake", "users")
-```
-
-See the [DuckDB Interop Guide](https://github.com/pdet/ducklake-polars/wiki/DuckDB-Interop) for detailed interop patterns.
-
-## Supported data types
+## Data types
 
 | DuckLake / DuckDB type | Polars type | Notes |
 |---|---|---|
-| `TINYINT` / `int8` | `Int8` | |
-| `SMALLINT` / `int16` | `Int16` | |
-| `INTEGER` / `int32` | `Int32` | |
-| `BIGINT` / `int64` | `Int64` | |
-| `UTINYINT` / `uint8` | `UInt8` | |
-| `USMALLINT` / `uint16` | `UInt16` | |
-| `UINTEGER` / `uint32` | `UInt32` | |
-| `UBIGINT` / `uint64` | `UInt64` | |
-| `FLOAT` / `float32` | `Float32` | |
-| `DOUBLE` / `float64` | `Float64` | |
+| `TINYINT` – `BIGINT` | `Int8` – `Int64` | |
+| `UTINYINT` – `UBIGINT` | `UInt8` – `UInt64` | |
+| `FLOAT` / `DOUBLE` | `Float32` / `Float64` | |
 | `BOOLEAN` | `Boolean` | |
 | `VARCHAR` | `String` | |
 | `BLOB` | `Binary` | |
 | `DATE` | `Date` | |
-| `TIME` / `time_ns` / `timetz` | `Time` | |
-| `TIMESTAMP` / `timestamp_us` | `Datetime("us")` | |
-| `TIMESTAMP_MS` | `Datetime("ms")` | |
-| `TIMESTAMP_NS` | `Datetime("ns")` | |
-| `TIMESTAMP_S` | `Datetime("us")` | DuckDB writes as microseconds in Parquet |
+| `TIME` / `TIMETZ` / `TIME_NS` | `Time` | |
+| `TIMESTAMP` (all precisions) | `Datetime("us"/"ms"/"ns")` | |
 | `TIMESTAMPTZ` | `Datetime("us", "UTC")` | |
 | `DECIMAL(p, s)` | `Decimal(p, s)` | |
 | `UUID` | `Binary` | 16-byte binary in Parquet |
 | `JSON` | `Binary` | Cast to `String` for text access |
-| `HUGEINT` | `Int128` | Limited: DuckDB writes as Float64 in Parquet |
-| `UHUGEINT` | `UInt128` | Limited: DuckDB writes as Float64 in Parquet |
-| `INTERVAL` | `Duration("us")` | Limited: Polars Parquet reader limitation |
+| `HUGEINT` / `UHUGEINT` | `Int128` / `UInt128` | ⚠️ DuckDB writes as Float64 in Parquet |
+| `INTERVAL` | `Duration("us")` | ⚠️ Polars Parquet reader limitation |
 | `LIST(T)` | `List(T)` | Recursive nesting supported |
-| `STRUCT(...)` | `Struct(...)` | Recursive nesting supported |
-| `MAP(K, V)` | `List(Struct(key, value))` | Limited: Polars Parquet reader issue |
+| `STRUCT(...)` | `Struct(...)` | Recursive nesting, field renames tracked |
+| `MAP(K, V)` | `List(Struct(key, value))` | ⚠️ Polars Parquet reader limitation |
+| `ENUM` | `String` | Mapped to VARCHAR |
 | `GEOMETRY` | `Binary` | |
-| `VARIANT` | `String` | |
+| `BIT` | `String` | |
+| `VARIANT` | `String` | Schema-mapped; binary interop with DuckDB not supported |
 
-## Package Structure
+## Pandas usage
+
+The `ducklake_pandas` package mirrors the Polars API with Pandas-idiomatic differences:
+
+```python
+import pandas as pd
+from ducklake_pandas import read_ducklake, write_ducklake, delete_ducklake, DuckLakeCatalog
+
+# Read with optional predicate for file pruning
+df = read_ducklake("catalog.ducklake", "users", predicate=lambda df: df["region"] == "US")
+
+# Write
+write_ducklake(pd.DataFrame({"id": [1], "name": ["Alice"]}), "catalog.ducklake", "users", mode="append")
+
+# Delete (predicate is a callable, not pl.Expr)
+deleted = delete_ducklake("catalog.ducklake", "users", lambda df: df["id"] == 2)
+
+# Table creation uses DuckDB type strings instead of Polars types
+from ducklake_pandas import create_ducklake_table
+create_ducklake_table("catalog.ducklake", "events", {"ts": "timestamp", "value": "double"})
+
+# Catalog API returns pd.DataFrame
+catalog = DuckLakeCatalog("catalog.ducklake")
+catalog.snapshots()  # pd.DataFrame
+```
+
+Key differences from the Polars wrapper:
+- No lazy evaluation (`scan_ducklake` is Polars-only)
+- `read_ducklake` accepts a `predicate=` callable for file-level pruning (partition + stats)
+- `create_ducklake_table` takes DuckDB type strings (`"int64"`, `"varchar"`) instead of Polars types
+- DML predicates are callables (`lambda df: df["col"] > 5`) instead of `pl.Expr`
+
+All DDL operations, catalog inspection, tags, sort keys, views, and maintenance functions share the same signatures.
+
+## Known limitations
+
+- **No object storage** — local filesystem only (no S3, GCS, Azure). This is the main production blocker.
+- **No concurrent write safety** — no optimistic concurrency control or conflict detection. Single-writer scenarios only.
+- **No UNION type** — DuckDB's UNION type is not mapped.
+- **No MySQL backend** — only SQLite, PostgreSQL, and DuckDB.
+- **No Parquet encryption** — encrypted DuckLake files cannot be read or written.
+- **No automatic inline promotion** — inlined data is only flushed to Parquet on overwrite, not on threshold.
+- **VARIANT binary interop** — VARIANT columns are schema-mapped as String, but the binary format used by DuckDB is not interoperable.
+- **HUGEINT precision** — DuckDB writes HUGEINT as Float64 in Parquet, causing precision loss for large values.
+- **MAP type** — Polars reads MAP columns as `List(Struct(key, value))` due to a Polars Parquet reader limitation.
+
+See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for the full compatibility matrix.
+
+## Package structure
 
 ```
 src/
@@ -358,19 +389,15 @@ src/
 │   └── _writer.py             Catalog writer (all DDL, DML, maintenance)
 ├── ducklake_polars/           Polars wrapper
 │   ├── __init__.py            Public API (scan/read/write/DDL/DML)
-│   ├── _catalog.py            Polars-specific catalog reader (delegates to core)
 │   ├── _catalog_api.py        DuckLakeCatalog returning Polars DataFrames
 │   ├── _dataset.py            PythonDatasetProvider (lazy scan_parquet)
 │   ├── _schema.py             DuckDB type → Polars type mapping
-│   ├── _stats.py              Column statistics for Polars file pruning
-│   └── _writer.py             Thin wrapper over core writer
+│   └── _stats.py              Column statistics for Polars file pruning
 └── ducklake_pandas/           Pandas wrapper
     ├── __init__.py            Public API (read/write/DDL/DML)
     ├── _catalog_api.py        DuckLakeCatalog returning Pandas DataFrames
     └── _writer.py             Thin wrapper over core writer
 ```
-
-See the [Architecture Overview](https://github.com/pdet/ducklake-polars/wiki/Architecture) for a detailed deep-dive.
 
 ## Development
 
@@ -391,15 +418,7 @@ pytest -k "test_views"    # Specific pattern
 DUCKLAKE_PG_DSN="postgresql://user:pass@localhost/testdb" pytest
 ```
 
-Test suite: **590+ tests** (5 xfailed for known DuckDB/Polars limitations). Tests are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. Both Polars and Pandas wrappers are tested for interoperability with DuckDB's native extension.
-
-## Documentation
-
-- [Architecture Overview](https://github.com/pdet/ducklake-polars/wiki/Architecture)
-- [API Reference](https://github.com/pdet/ducklake-polars/wiki/API-Reference)
-- [Configuration Guide](https://github.com/pdet/ducklake-polars/wiki/Configuration)
-- [Feature Examples](https://github.com/pdet/ducklake-polars/wiki/Examples)
-- [DuckDB Interop Guide](https://github.com/pdet/ducklake-polars/wiki/DuckDB-Interop)
+Test suite: **590+ tests** (5 xfailed for known DuckDB/Polars limitations). Tests are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. Both wrappers are tested for interoperability with DuckDB's native extension.
 
 ## License
 
