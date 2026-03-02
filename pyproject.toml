@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ducklake-polars"
-version = "0.1.1"
-description = "Polars integration for DuckLake catalogs"
+name = "ducklake-dataframe"
+version = "0.2.0"
+description = "DataFrame integration for DuckLake catalogs — Polars, pandas, and more"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
     { name = "Pedro Holanda", email = "pedroholanda@gmail.com" },
 ]
-keywords = ["ducklake", "polars", "data-lake", "parquet", "iceberg"]
+keywords = ["ducklake", "polars", "pandas", "data-lake", "parquet", "dataframe"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -28,7 +28,6 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "polars>=1.0",
     "pyarrow>=10.0",
 ]
 
@@ -38,17 +37,27 @@ Repository = "https://github.com/pdet/ducklake-polars"
 Issues = "https://github.com/pdet/ducklake-polars/issues"
 
 [project.optional-dependencies]
+polars = ["polars>=1.0"]
+pandas = ["pandas>=1.5"]
+duckdb = ["duckdb>=1.2"]
 postgres = ["psycopg2-binary>=2.9"]
-pandas = ["pandas>=1.5", "pyarrow>=10.0"]
 cloud = ["fsspec>=2023.1"]
 s3 = ["fsspec>=2023.1", "s3fs"]
 gcs = ["fsspec>=2023.1", "gcsfs"]
 azure = ["fsspec>=2023.1", "adlfs"]
+all = [
+    "polars>=1.0",
+    "pandas>=1.5",
+    "duckdb>=1.2",
+    "psycopg2-binary>=2.9",
+    "fsspec>=2023.1",
+]
 dev = [
     "pytest>=7.0",
     "pytest-xdist",
     "pytest-timeout",
     "duckdb>=1.2",
+    "polars>=1.0",
     "pandas>=1.5",
     "hypothesis>=6.0",
     "pytz",

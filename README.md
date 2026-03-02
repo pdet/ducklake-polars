@@ -1,4 +1,4 @@
-# ducklake-polars
+# ducklake-dataframe
 
 > **This project is a proof of concept. It was 100% written by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code/overview) (Anthropic's AI coding agent). It is not intended for production use.**
 
@@ -29,15 +29,18 @@ Both wrappers delegate to the shared core for writes, DDL, catalog inspection, a
 ## Installation
 
 ```bash
-pip install ducklake-polars    # Polars integration
-pip install ducklake-pandas    # Pandas integration
-
-# With PostgreSQL catalog support
-pip install ducklake-polars[postgres]
-pip install ducklake-pandas[postgres]
+pip install ducklake-dataframe[polars]           # Polars engine
+pip install ducklake-dataframe[pandas]           # Pandas engine
+pip install ducklake-dataframe[polars,pandas]    # Both engines
+pip install ducklake-dataframe[polars,postgres]  # Polars + PostgreSQL catalog
+pip install ducklake-dataframe[polars,s3]        # Polars + S3 object storage
+pip install ducklake-dataframe[all]              # Everything
 ```
 
-**Dependencies:** `polars >= 1.0` and/or `pandas >= 1.5`, plus `pyarrow >= 10.0`. SQLite catalogs use Python's built-in `sqlite3`. PostgreSQL catalogs require `psycopg2` (via the `[postgres]` extra). DuckDB `.ducklake` files are also SQLite-based and work out of the box.
+**Core dependency:** `pyarrow >= 10.0` only. Everything else is optional:
+- **Engines:** `polars >= 1.0`, `pandas >= 1.5` — install at least one
+- **Catalogs:** SQLite (built-in), PostgreSQL (`[postgres]`), DuckDB (`[duckdb]`)
+- **Storage:** Local (built-in), S3 (`[s3]`), GCS (`[gcs]`), Azure (`[azure]`)
 
 ## Tutorial
 
@@ -158,7 +161,7 @@ catalog.table_changes("users", start_version=1, end_version=5)  # Change data fe
 
 ### 7. DuckDB interoperability
 
-Catalogs are fully interoperable — create with DuckDB, read with ducklake-polars, or vice versa:
+Catalogs are fully interoperable — create with DuckDB, read with ducklake-dataframe, or vice versa:
 
 ```python
 import duckdb
@@ -177,7 +180,7 @@ lf = scan_ducklake("catalog.ducklake", "events")
 print(lf.collect())
 ```
 
-The reverse also works: write with ducklake-polars, query with DuckDB SQL.
+The reverse also works: write with ducklake-dataframe, query with DuckDB SQL.
 
 ## API Reference
 
@@ -402,8 +405,8 @@ src/
 ## Development
 
 ```bash
-git clone https://github.com/pdet/ducklake-polars.git
-cd ducklake-polars
+git clone https://github.com/pdet/ducklake-dataframe.git
+cd ducklake-dataframe
 pip install -e ".[dev]"
 ```
 

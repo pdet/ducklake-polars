@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+try:
+    import polars  # noqa: F401
+except ImportError as _e:
+    raise ImportError(
+        "Polars is required for ducklake_polars. "
+        "Install with: pip install ducklake-dataframe[polars]"
+    ) from _e
+
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path

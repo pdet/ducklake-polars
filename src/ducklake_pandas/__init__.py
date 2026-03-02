@@ -5,6 +5,14 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, Callable
 
+try:
+    import pandas  # noqa: F401
+except ImportError as _e:
+    raise ImportError(
+        "Pandas is required for ducklake_pandas. "
+        "Install with: pip install ducklake-dataframe[pandas]"
+    ) from _e
+
 if TYPE_CHECKING:
     from datetime import datetime
     from pathlib import Path
