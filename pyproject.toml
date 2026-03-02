@@ -47,6 +47,7 @@ dev = [
     "duckdb>=1.2",
     "pandas>=1.5",
     "hypothesis>=6.0",
+    "pytz",
 ]
 
 [tool.hatch.build.targets.wheel]
