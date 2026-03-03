@@ -16,11 +16,16 @@ from ducklake_core._writer import TransactionConflictError
 
 
 class TestConcurrentInserts:
-    """Concurrent inserts to the same table should succeed (append-only)."""
+    """Concurrent inserts to the same table should succeed (append-only).
 
-    def test_concurrent_inserts_same_table(self, ducklake_catalog):
+    SQLite-only: Postgres uses READ COMMITTED isolation and doesn't support
+    the IMMEDIATE locking that prevents concurrent ID races. DuckDB's native
+    extension handles Postgres concurrency at the C++ level.
+    """
+
+    def test_concurrent_inserts_same_table(self, ducklake_catalog_sqlite):
         """Two threads inserting into the same table simultaneously."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER, b VARCHAR)")
         cat.close()
 
@@ -50,9 +55,9 @@ class TestConcurrentInserts:
         result = read_ducklake(cat.metadata_path, "test", data_path=cat.data_path)
         assert result.shape[0] == 100
 
-    def test_concurrent_inserts_different_tables(self, ducklake_catalog):
+    def test_concurrent_inserts_different_tables(self, ducklake_catalog_sqlite):
         """Two threads inserting into different tables."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.t1 (a INTEGER)")
         cat.execute("CREATE TABLE ducklake.t2 (a INTEGER)")
         cat.close()
@@ -92,9 +97,9 @@ class TestConcurrentInserts:
         assert r1.shape[0] == 3
         assert r2.shape[0] == 3
 
-    def test_sequential_after_concurrent(self, ducklake_catalog):
+    def test_sequential_after_concurrent(self, ducklake_catalog_sqlite):
         """After concurrent inserts, sequential reads/writes work correctly."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         cat.close()
 
@@ -123,9 +128,9 @@ class TestConcurrentInserts:
 class TestRetryLogic:
     """Test that retry parameters are accepted."""
 
-    def test_writer_accepts_retry_params(self, ducklake_catalog):
+    def test_writer_accepts_retry_params(self, ducklake_catalog_sqlite):
         """Writer constructor accepts retry parameters."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         cat.close()
 
