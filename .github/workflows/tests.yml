@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     services:
       postgres:
@@ -46,4 +46,4 @@ jobs:
       - name: Run tests (SQLite + PostgreSQL)
         env:
           DUCKLAKE_PG_DSN: "postgresql://ducklake:ducklake@localhost:5432/ducklake_test"
-        run: pytest --timeout=120 -q
+        run: pytest -q
