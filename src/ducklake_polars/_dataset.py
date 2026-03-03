@@ -139,6 +139,44 @@ def _top_level_history(history: list[ColumnHistoryEntry]) -> list[ColumnHistoryE
     return [e for e in history if e.parent_column is None]
 
 
+def _has_renames_from_mappings(
+    data_files: list[FileInfo],
+    name_mappings: dict[int, dict[int, str]],
+    current_columns: list[ColumnInfo],
+    resolved_paths: dict[int, str] | None = None,
+) -> bool:
+    """Check if any file's name mapping indicates renames or drop+re-add conflicts.
+
+    When *resolved_paths* is provided (``{data_file_id: abs_path}``), files
+    without a ``mapping_id`` are checked via Parquet field_id metadata.
+    """
+    current_names: dict[int, str] = {c.column_id: c.column_name for c in current_columns if c.parent_column is None}
+    current_name_set = set(current_names.values())
+
+    for f in data_files:
+        mapping: dict[int, str] | None = None
+
+        if f.mapping_id is not None and f.mapping_id in name_mappings:
+            mapping = name_mappings[f.mapping_id]
+        elif resolved_paths and f.data_file_id in resolved_paths:
+            # Read field_ids from Parquet metadata
+            field_ids = _read_field_ids_from_parquet(resolved_paths[f.data_file_id])
+            if field_ids:
+                # Convert {name: fid} → {fid: name}
+                mapping = {fid: name for name, fid in field_ids.items()}
+
+        if mapping is None:
+            continue
+
+        for field_id, source_name in mapping.items():
+            if field_id in current_names:
+                if source_name != current_names[field_id]:
+                    return True
+            elif source_name in current_name_set:
+                return True
+    return False
+
+
 def _has_renames(
     history: list[ColumnHistoryEntry],
     current_columns: list[ColumnInfo],
@@ -343,22 +381,122 @@ def _get_physical_type_key(
     return frozenset(diffs)
 
 
+def _get_rename_map_from_mapping(
+    name_mapping: dict[int, str],
+    current_columns: list[ColumnInfo],
+) -> dict[str, str]:
+    """Build ``{physical_name: current_name}`` from a field_id-based name mapping.
+
+    ``name_mapping`` is ``{target_field_id: source_name}`` where
+    ``target_field_id`` equals the column_id.  ``current_columns`` gives us
+    column_id → current_name at the read snapshot.  When a column has been
+    renamed, ``source_name`` (the old physical name) differs from the current
+    name, producing a rename entry.
+    """
+    current_names: dict[int, str] = {c.column_id: c.column_name for c in current_columns if c.parent_column is None}
+    current_name_set = set(current_names.values())
+    rename_map: dict[str, str] = {}
+
+    for field_id, source_name in name_mapping.items():
+        if field_id in current_names:
+            current_name = current_names[field_id]
+            if source_name != current_name:
+                rename_map[source_name] = current_name
+        else:
+            # Column was dropped — if the source_name collides with a
+            # current column name (drop+re-add), map it to a dummy.
+            if source_name in current_name_set and source_name not in rename_map:
+                rename_map[source_name] = f"__ducklake_dropped_{field_id}__"
+
+    return rename_map
+
+
+def _read_field_ids_from_parquet(file_path: str) -> dict[str, int] | None:
+    """Read ``{column_name: field_id}`` from a Parquet file's Arrow schema.
+
+    DuckDB writes ``PARQUET:field_id`` metadata on each field in the
+    Parquet schema.  Returns ``None`` if the file has no field_id metadata.
+    """
+    try:
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(file_path)
+        schema = pf.schema_arrow
+        result: dict[str, int] = {}
+        for field in schema:
+            if field.metadata and b"PARQUET:field_id" in field.metadata:
+                fid = int(field.metadata[b"PARQUET:field_id"])
+                result[field.name] = fid
+        return result if result else None
+    except Exception:
+        return None
+
+
+def _get_rename_map_from_parquet_field_ids(
+    field_ids: dict[str, int],
+    current_columns: list[ColumnInfo],
+) -> dict[str, str]:
+    """Build ``{physical_name: current_name}`` from Parquet field_id metadata.
+
+    ``field_ids`` is ``{column_name_in_parquet: field_id}`` read from the
+    Parquet schema.  ``current_columns`` maps column_id → current_name.
+    """
+    current_names: dict[int, str] = {c.column_id: c.column_name for c in current_columns if c.parent_column is None}
+    current_name_set = set(current_names.values())
+    rename_map: dict[str, str] = {}
+
+    for phys_name, field_id in field_ids.items():
+        if field_id in current_names:
+            current_name = current_names[field_id]
+            if phys_name != current_name:
+                rename_map[phys_name] = current_name
+        else:
+            # Column dropped — handle name collision
+            if phys_name in current_name_set and phys_name not in rename_map:
+                rename_map[phys_name] = f"__ducklake_dropped_{field_id}__"
+
+    return rename_map
+
+
 def _group_files_by_rename_map(
     files: list[FileInfo],
     history: list[ColumnHistoryEntry],
     current_columns: list[ColumnInfo],
+    name_mappings: dict[int, dict[int, str]] | None = None,
+    resolved_paths: dict[int, str] | None = None,
 ) -> list[tuple[dict[str, str], Any, list[FileInfo]]]:
     """Group files by their rename map, struct field renames, and type changes.
 
     Returns list of (rename_map, struct_field_renames, files_list) tuples.
     struct_field_renames is ``dict[str, list[str]] | None``.
+
+    When *name_mappings* is provided (``{mapping_id: {field_id: source_name}}``),
+    files with a ``mapping_id`` use field_id-based rename detection which is
+    more reliable than the history-based fallback.
+
+    When *resolved_paths* is provided, files without a mapping_id will have
+    their Parquet schema read to extract field_id metadata for rename detection.
     """
     groups: dict[tuple, list[FileInfo]] = defaultdict(list)
     rename_maps: dict[tuple, dict[str, str]] = {}
     struct_renames_map: dict[tuple, Any] = {}
 
     for f in files:
-        rmap = _get_rename_map(f.begin_snapshot, history, current_columns)
+        rmap: dict[str, str] | None = None
+
+        # Prefer field_id mapping from catalog (ducklake_name_mapping)
+        if name_mappings and f.mapping_id is not None and f.mapping_id in name_mappings:
+            rmap = _get_rename_map_from_mapping(name_mappings[f.mapping_id], current_columns)
+        elif resolved_paths and f.data_file_id in resolved_paths:
+            # Fall back to Parquet field_id metadata
+            field_ids = _read_field_ids_from_parquet(resolved_paths[f.data_file_id])
+            if field_ids:
+                rmap = _get_rename_map_from_parquet_field_ids(field_ids, current_columns)
+
+        # Ultimate fallback: history-based rename detection
+        if rmap is None:
+            rmap = _get_rename_map(f.begin_snapshot, history, current_columns)
+
         srenames = _get_struct_field_renames(f.begin_snapshot, history, current_columns)
         type_key = _get_physical_type_key(f.begin_snapshot, history, current_columns)
 
@@ -425,12 +563,25 @@ class DuckLakeDataset:
         if self.snapshot_version is not None and self.snapshot_time is not None:
             msg = "Cannot specify both snapshot_version and snapshot_time"
             raise ValueError(msg)
+        # Persistent reader: reused between schema() and to_dataset_scan()
+        self._reader: DuckLakeCatalogReader | None = None
+        # Metadata cache: populated by schema(), consumed by to_dataset_scan()
+        self._cached_snapshot: Any = None
+        self._cached_table: TableInfo | None = None
+        self._cached_all_columns: list[ColumnInfo] | None = None
 
     def _get_reader(self) -> DuckLakeCatalogReader:
-        return DuckLakeCatalogReader(
-            self.metadata_path,
-            data_path_override=self.data_path_override,
-        )
+        if self._reader is None:
+            self._reader = DuckLakeCatalogReader(
+                self.metadata_path,
+                data_path_override=self.data_path_override,
+            )
+        return self._reader
+
+    def _close_reader(self) -> None:
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
 
     def _resolve_snapshot(self, reader: DuckLakeCatalogReader) -> Any:
         if self.snapshot_version is not None:
@@ -438,6 +589,22 @@ class DuckLakeDataset:
         if self.snapshot_time is not None:
             return reader.get_snapshot_at_time(self.snapshot_time)
         return reader.get_current_snapshot()
+
+    def _consume_cache(self, reader: DuckLakeCatalogReader) -> tuple[Any, TableInfo, list[ColumnInfo]]:
+        """Return cached metadata if available, otherwise fetch fresh."""
+        if self._cached_snapshot is not None:
+            snapshot = self._cached_snapshot
+            table = self._cached_table
+            all_columns = self._cached_all_columns
+            # Clear cache (single use)
+            self._cached_snapshot = None
+            self._cached_table = None
+            self._cached_all_columns = None
+            return snapshot, table, all_columns  # type: ignore[return-value]
+        snapshot = self._resolve_snapshot(reader)
+        table = reader.get_table(self.table_name, self.schema_name, snapshot.snapshot_id)
+        all_columns = reader.get_all_columns(table.table_id, snapshot.snapshot_id)
+        return snapshot, table, all_columns
 
     #
     # PythonDatasetProvider interface
@@ -514,12 +681,21 @@ class DuckLakeDataset:
         return result
 
     def schema(self) -> Schema:
-        """Return the table schema as a Polars Schema."""
-        with self._get_reader() as reader:
-            snapshot = self._resolve_snapshot(reader)
-            table = reader.get_table(self.table_name, self.schema_name, snapshot.snapshot_id)
-            all_columns = reader.get_all_columns(table.table_id, snapshot.snapshot_id)
-            return pl.Schema(self._build_schema_from_columns(all_columns))
+        """Return the table schema as a Polars Schema.
+
+        Caches snapshot, table, and column metadata so that a subsequent
+        ``to_dataset_scan`` call can reuse them without re-querying the
+        catalog.
+        """
+        reader = self._get_reader()
+        snapshot = self._resolve_snapshot(reader)
+        table = reader.get_table(self.table_name, self.schema_name, snapshot.snapshot_id)
+        all_columns = reader.get_all_columns(table.table_id, snapshot.snapshot_id)
+        # Cache for reuse in to_dataset_scan()
+        self._cached_snapshot = snapshot
+        self._cached_table = table
+        self._cached_all_columns = all_columns
+        return pl.Schema(self._build_schema_from_columns(all_columns))
 
     @staticmethod
     def _build_scan_kwargs(
@@ -612,8 +788,9 @@ class DuckLakeDataset:
         """
         from polars.io.parquet.functions import scan_parquet
 
-        with self._get_reader() as reader:
-            snapshot = self._resolve_snapshot(reader)
+        reader = self._get_reader()
+        try:
+            snapshot, table, all_columns = self._consume_cache(reader)
             version_key = str(snapshot.snapshot_id)
 
             # Short-circuit if version hasn't changed
@@ -623,10 +800,6 @@ class DuckLakeDataset:
             ):
                 return None
 
-            table = reader.get_table(
-                self.table_name, self.schema_name, snapshot.snapshot_id
-            )
-            all_columns = reader.get_all_columns(table.table_id, snapshot.snapshot_id)
             columns = [c for c in all_columns if c.parent_column is None]
             column_names = [c.column_name for c in columns]
 
@@ -687,16 +860,40 @@ class DuckLakeDataset:
                     if not reader._backend.is_table_not_found(e):
                         raise
 
-            # Detect column renames and struct field renames
-            history = reader.get_column_history(table.table_id)
-            has_rename = _has_renames(history, all_columns)
+            # Resolve file paths once for reuse
+            resolved_paths: dict[int, str] = {
+                f.data_file_id: reader.resolve_data_file_path(f.path, f.path_is_relative, table)
+                for f in data_files
+            }
+
+            # Detect column renames and struct field renames.
+            # Fast path: if no column has ever been dropped/renamed
+            # (end_snapshot IS NULL for all), skip the full history fetch
+            # and the expensive Parquet field_id checks.
+            _has_col_changes = reader.has_column_changes(table.table_id)
+            name_mappings: dict[int, dict[int, str]] = {}
+            if _has_col_changes:
+                # Load field_id-based name mappings (only needed for rename detection)
+                mapping_ids_seen: set[int] = set()
+                for f in data_files:
+                    if f.mapping_id is not None and f.mapping_id not in mapping_ids_seen:
+                        mapping_ids_seen.add(f.mapping_id)
+                        name_mappings[f.mapping_id] = reader.get_name_mapping(f.mapping_id)
+
+                history = reader.get_column_history(table.table_id)
+                has_rename = _has_renames(history, all_columns)
+                if not has_rename:
+                    has_rename = _has_renames_from_mappings(
+                        data_files, name_mappings, all_columns,
+                        resolved_paths=resolved_paths,
+                    )
+            else:
+                history = []
+                has_rename = False
 
             if not has_rename:
                 # Fast path: no renames, existing code
-                sources = [
-                    reader.resolve_data_file_path(f.path, f.path_is_relative, table)
-                    for f in data_files
-                ]
+                sources = [resolved_paths[f.data_file_id] for f in data_files]
 
                 kwargs = self._build_scan_kwargs(
                     data_files, delete_files, reader, table,
@@ -710,13 +907,17 @@ class DuckLakeDataset:
                 # Parquet SCAN nodes.  We collect each file group eagerly,
                 # apply renames, write the combined result to a temporary
                 # Parquet file, and return scan_parquet on that file.
-                groups = _group_files_by_rename_map(data_files, history, all_columns)
+                groups = _group_files_by_rename_map(
+                    data_files, history, all_columns,
+                    name_mappings=name_mappings,
+                    resolved_paths=resolved_paths,
+                )
                 catalog_schema = self._build_schema_from_columns(all_columns)
 
                 group_dfs: list[pl.DataFrame] = []
                 for rename_map, struct_field_renames, group_files_list in groups:
                     sources = [
-                        reader.resolve_data_file_path(f.path, f.path_is_relative, table)
+                        resolved_paths[f.data_file_id]
                         for f in group_files_list
                     ]
 
@@ -863,3 +1064,5 @@ class DuckLakeDataset:
                 )
 
             return lf, version_key
+        finally:
+            self._close_reader()

@@ -171,18 +171,19 @@ class DuckLakeCatalogReader:
     def _connect(self) -> Any:
         if self._con is None:
             self._con = self._backend.connect()
-            self._check_version()
+            self._load_metadata()
         return self._con
 
-    def _check_version(self) -> None:
-        """Validate the DuckLake catalog version is supported."""
-        row = self._con.execute(
-            self._sql("SELECT value FROM ducklake_metadata WHERE key = 'version'")
-        ).fetchone()
-        if row is None:
+    def _load_metadata(self) -> None:
+        """Load version and data_path from ducklake_metadata in a single query."""
+        rows = self._con.execute(
+            "SELECT key, value FROM ducklake_metadata WHERE key IN ('version', 'data_path')"
+        ).fetchall()
+        meta = {r[0]: r[1] for r in rows}
+        version = meta.get("version")
+        if version is None:
             msg = "No version found in ducklake_metadata — is this a valid DuckLake catalog?"
             raise ValueError(msg)
-        version = row[0]
         if version not in SUPPORTED_DUCKLAKE_VERSIONS:
             msg = (
                 f"Unsupported DuckLake catalog version '{version}'. "
@@ -190,6 +191,8 @@ class DuckLakeCatalogReader:
             )
             raise ValueError(msg)
         self._catalog_version = version
+        if self._data_path_override is None and "data_path" in meta:
+            self._data_path = meta["data_path"]
 
     def _sql(self, query: str) -> str:
         """Translate ``?`` placeholders to the backend's parameter style.
@@ -496,6 +499,24 @@ class DuckLakeCatalogReader:
             for r in rows
         ]
 
+    def has_column_changes(self, table_id: int) -> bool:
+        """Fast check: has any column ever been dropped, renamed, or re-added?
+
+        Returns True if any column in the table has ``end_snapshot IS NOT NULL``,
+        which is a necessary condition for renames, drops, or type changes to
+        exist.  When this returns False, ``get_column_history`` + ``_has_renames``
+        can be skipped entirely.
+        """
+        con = self._connect()
+        row = con.execute(
+            self._sql(
+                "SELECT EXISTS(SELECT 1 FROM ducklake_column "
+                "WHERE table_id = ? AND end_snapshot IS NOT NULL)"
+            ),
+            [table_id],
+        ).fetchone()
+        return bool(row and row[0])
+
     def get_column_history(self, table_id: int) -> list[ColumnHistoryEntry]:
         """Get all column definitions across all snapshots (for rename detection).
 
@@ -669,6 +690,25 @@ class DuckLakeCatalogReader:
             )
             for r in rows
         ]
+
+    def get_name_mapping(self, mapping_id: int) -> dict[int, str]:
+        """Return ``{target_field_id: source_name}`` for a name mapping.
+
+        Each data file records a ``mapping_id`` that links to the
+        ``ducklake_name_mapping`` table.  The mapping tells us the
+        physical column name in the Parquet file (``source_name``) and
+        the column ID it corresponds to (``target_field_id``).
+        """
+        con = self._connect()
+        rows = con.execute(
+            self._sql(
+                "SELECT source_name, target_field_id "
+                "FROM ducklake_name_mapping "
+                "WHERE mapping_id = ?"
+            ),
+            [mapping_id],
+        ).fetchall()
+        return {int(r[1]): r[0] for r in rows}
 
     def get_all_snapshots(self) -> list[tuple]:
         """Get all snapshots ordered by snapshot_id."""
