@@ -572,6 +572,7 @@ class TestFilterEdgeCases:
 # ===================================================================
 
 
+@pytest.mark.timeout(60)
 class TestMultipleOperations:
     """Test sequences of operations that stress test the catalog reader."""
 

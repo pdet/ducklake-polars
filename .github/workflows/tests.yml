@@ -46,4 +46,4 @@ jobs:
       - name: Run tests (SQLite + PostgreSQL)
         env:
           DUCKLAKE_PG_DSN: "postgresql://ducklake:ducklake@localhost:5432/ducklake_test"
-        run: pytest --timeout=120 -q
+        run: pytest --timeout=120 --timeout-method=thread -q
