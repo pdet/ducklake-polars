@@ -995,6 +995,7 @@ class TestPartitionEdgeCases:
     """Test edge cases specific to partitioning."""
 
     @pytest.mark.xfail(reason="DuckDB internal error: NULL partition values crash DuckLake extension")
+    @pytest.mark.timeout(30)
     def test_partition_with_null_values(self, ducklake_catalog):
         """Rows with NULL partition column values."""
         cat = ducklake_catalog
