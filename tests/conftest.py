@@ -172,6 +172,29 @@ def ducklake_catalog(request, tmp_path):
         catalog._cleanup_postgres_tables()
 
 
+@pytest.fixture
+def ducklake_catalog_sqlite(tmp_path):
+    """
+    Create a DuckLake catalog with SQLite backend only.
+
+    Used for tests that deadlock on Postgres (e.g., many sequential
+    DuckDB write operations on a Postgres-backed catalog).
+    """
+    metadata_path = str(tmp_path / "test.ducklake")
+    data_path = str(tmp_path / "data")
+
+    catalog = DuckLakeTestCatalog(
+        metadata_path=metadata_path,
+        data_path=data_path,
+        inline=False,
+        backend="sqlite",
+    )
+
+    yield catalog
+
+    catalog.close()
+
+
 @pytest.fixture(params=_get_backends())
 def ducklake_catalog_inline(request, tmp_path):
     """

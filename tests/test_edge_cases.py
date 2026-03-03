@@ -572,13 +572,17 @@ class TestFilterEdgeCases:
 # ===================================================================
 
 
-@pytest.mark.timeout(60)
 class TestMultipleOperations:
-    """Test sequences of operations that stress test the catalog reader."""
+    """Test sequences of operations that stress test the catalog reader.
 
-    def test_many_small_inserts(self, ducklake_catalog):
+    NOTE: These tests use only the SQLite backend fixture because DuckDB's
+    DuckLake extension can deadlock when executing many sequential write
+    operations on a Postgres-backed catalog.
+    """
+
+    def test_many_small_inserts(self, ducklake_catalog_sqlite):
         """Many 1-row inserts creating many Parquet files."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         for i in range(20):
             cat.execute(f"INSERT INTO ducklake.test VALUES ({i})")
@@ -588,9 +592,9 @@ class TestMultipleOperations:
         assert result.shape[0] == 20
         assert sorted(result["a"].to_list()) == list(range(20))
 
-    def test_insert_delete_repeat(self, ducklake_catalog):
+    def test_insert_delete_repeat(self, ducklake_catalog_sqlite):
         """Alternating inserts and deletes."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         cat.execute("INSERT INTO ducklake.test VALUES (1), (2), (3)")
         cat.execute("DELETE FROM ducklake.test WHERE a = 2")
@@ -602,8 +606,8 @@ class TestMultipleOperations:
         result = read_ducklake(cat.metadata_path, "test")
         assert sorted(result["a"].to_list()) == [3, 4, 5, 6]
 
-    def test_update_same_row_multiple_times(self, ducklake_catalog):
-        cat = ducklake_catalog
+    def test_update_same_row_multiple_times(self, ducklake_catalog_sqlite):
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (id INTEGER, val INTEGER)")
         cat.execute("INSERT INTO ducklake.test VALUES (1, 0)")
         cat.execute("UPDATE ducklake.test SET val = 1 WHERE id = 1")
@@ -615,8 +619,8 @@ class TestMultipleOperations:
         assert result.shape[0] == 1
         assert result["val"][0] == 3
 
-    def test_delete_all_then_multiple_inserts(self, ducklake_catalog):
-        cat = ducklake_catalog
+    def test_delete_all_then_multiple_inserts(self, ducklake_catalog_sqlite):
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         cat.execute("INSERT INTO ducklake.test SELECT i FROM range(100) t(i)")
         cat.execute("DELETE FROM ducklake.test")
@@ -628,9 +632,9 @@ class TestMultipleOperations:
         assert result.shape[0] == 2
         assert sorted(result["a"].to_list()) == [1000, 2000]
 
-    def test_schema_evolution_multiple_steps(self, ducklake_catalog):
+    def test_schema_evolution_multiple_steps(self, ducklake_catalog_sqlite):
         """Add column, insert, drop column, add another, insert."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER)")
         cat.execute("INSERT INTO ducklake.test VALUES (1)")
 
@@ -996,10 +1000,9 @@ class TestPartitionEdgeCases:
     """Test edge cases specific to partitioning."""
 
     @pytest.mark.xfail(reason="DuckDB internal error: NULL partition values crash DuckLake extension")
-    @pytest.mark.timeout(30)
-    def test_partition_with_null_values(self, ducklake_catalog):
+    def test_partition_with_null_values(self, ducklake_catalog_sqlite):
         """Rows with NULL partition column values."""
-        cat = ducklake_catalog
+        cat = ducklake_catalog_sqlite
         cat.execute("CREATE TABLE ducklake.test (a INTEGER, part VARCHAR)")
         cat.execute("ALTER TABLE ducklake.test SET PARTITIONED BY (part)")
         cat.execute(
