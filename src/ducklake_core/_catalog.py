@@ -330,6 +330,55 @@ class DuckLakeCatalogReader:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def list_views(self, schema_name: str = "main") -> list[str]:
+        """List all view names in a schema at the current snapshot."""
+        con = self._connect()
+        snapshot = self.get_current_snapshot()
+        rows = con.execute(
+            self._sql("""
+            SELECT v.view_name
+            FROM ducklake_view v
+            JOIN ducklake_schema s ON v.schema_id = s.schema_id
+            WHERE LOWER(s.schema_name) = LOWER(?)
+              AND ? >= v.begin_snapshot
+              AND (? < v.end_snapshot OR v.end_snapshot IS NULL)
+              AND ? >= s.begin_snapshot
+              AND (? < s.end_snapshot OR s.end_snapshot IS NULL)
+            ORDER BY v.view_name
+            """),
+            [schema_name, snapshot.snapshot_id, snapshot.snapshot_id,
+             snapshot.snapshot_id, snapshot.snapshot_id],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_view(self, view_name: str, schema_name: str = "main") -> dict | None:
+        """Get view definition (SQL, dialect, column aliases)."""
+        con = self._connect()
+        snapshot = self.get_current_snapshot()
+        row = con.execute(
+            self._sql("""
+            SELECT v.view_name, v.dialect, v.sql, v.column_aliases
+            FROM ducklake_view v
+            JOIN ducklake_schema s ON v.schema_id = s.schema_id
+            WHERE LOWER(s.schema_name) = LOWER(?)
+              AND LOWER(v.view_name) = LOWER(?)
+              AND ? >= v.begin_snapshot
+              AND (? < v.end_snapshot OR v.end_snapshot IS NULL)
+              AND ? >= s.begin_snapshot
+              AND (? < s.end_snapshot OR s.end_snapshot IS NULL)
+            """),
+            [schema_name, view_name, snapshot.snapshot_id, snapshot.snapshot_id,
+             snapshot.snapshot_id, snapshot.snapshot_id],
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "view_name": row[0],
+            "dialect": row[1],
+            "sql": row[2],
+            "column_aliases": row[3],
+        }
+
     def list_snapshots(self, limit: int = 20) -> list[dict]:
         """List recent snapshots ordered by id descending."""
         con = self._connect()

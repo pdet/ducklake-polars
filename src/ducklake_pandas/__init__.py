@@ -52,6 +52,8 @@ __all__ = [
     "delete_ducklake_table_tag",
     "delete_ducklake_column_tag",
     "list_tables",
+    "list_views",
+    "get_view",
     "list_snapshots",
     "catalog_info",
     "DuckLakeCatalog",
@@ -1777,3 +1779,28 @@ def catalog_info(
     dp = os.fspath(data_path) if data_path is not None else None
     with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
         return reader.catalog_info()
+
+
+def list_views(
+    path: str | Path,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """List all view names in a DuckLake catalog schema."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.list_views(schema)
+
+
+def get_view(
+    path: str | Path,
+    name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> dict | None:
+    """Get view definition (SQL, dialect, column aliases)."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.get_view(name, schema)
