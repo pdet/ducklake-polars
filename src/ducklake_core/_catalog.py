@@ -395,6 +395,39 @@ class DuckLakeCatalogReader:
             "column_aliases": row[3],
         }
 
+    def table_info(self, table_name: str, schema_name: str = "main") -> list[dict]:
+        """Get column info for a table: name, type, nullable."""
+        con = self._connect()
+        snapshot = self.get_current_snapshot()
+        # Find table
+        row = con.execute(
+            self._sql("""
+            SELECT t.table_id
+            FROM ducklake_table t
+            JOIN ducklake_schema s ON t.schema_id = s.schema_id
+            WHERE LOWER(s.schema_name) = LOWER(?)
+              AND LOWER(t.table_name) = LOWER(?)
+              AND ? >= t.begin_snapshot
+              AND (? < t.end_snapshot OR t.end_snapshot IS NULL)
+              AND ? >= s.begin_snapshot
+              AND (? < s.end_snapshot OR s.end_snapshot IS NULL)
+            """),
+            [schema_name, table_name, snapshot.snapshot_id, snapshot.snapshot_id,
+             snapshot.snapshot_id, snapshot.snapshot_id],
+        ).fetchone()
+        if row is None:
+            return []
+        columns = self.get_columns(row[0], snapshot.snapshot_id)
+        return [
+            {
+                "column_name": c.column_name,
+                "column_type": c.column_type,
+                "nullable": c.nulls_allowed,
+                "column_order": c.column_order,
+            }
+            for c in sorted(columns, key=lambda c: c.column_order)
+        ]
+
     def list_snapshots(self, limit: int = 20) -> list[dict]:
         """List recent snapshots ordered by id descending."""
         con = self._connect()
