@@ -1059,7 +1059,7 @@ class DuckLakeCatalogWriter:
         row = con.execute(
             "SELECT t.table_id FROM ducklake_table t "
             "JOIN ducklake_schema s ON t.schema_id = s.schema_id "
-            "WHERE t.table_name = ? AND s.schema_name = ? "
+            "WHERE LOWER(t.table_name) = LOWER(?) AND s.schema_name = ? "
             "AND ? >= t.begin_snapshot AND (? < t.end_snapshot OR t.end_snapshot IS NULL) "
             "AND ? >= s.begin_snapshot AND (? < s.end_snapshot OR s.end_snapshot IS NULL)",
             [table_name, schema_name, snapshot_id, snapshot_id, snapshot_id, snapshot_id],
@@ -1383,7 +1383,7 @@ class DuckLakeCatalogWriter:
             "SELECT t.table_id, t.path, t.path_is_relative, s.path, s.path_is_relative "
             "FROM ducklake_table t "
             "JOIN ducklake_schema s ON t.schema_id = s.schema_id "
-            "WHERE t.table_name = ? AND s.schema_name = ? "
+            "WHERE LOWER(t.table_name) = LOWER(?) AND s.schema_name = ? "
             "AND ? >= t.begin_snapshot AND (? < t.end_snapshot OR t.end_snapshot IS NULL) "
             "AND ? >= s.begin_snapshot AND (? < s.end_snapshot OR s.end_snapshot IS NULL)",
             [table_name, schema_name, snapshot_id, snapshot_id, snapshot_id, snapshot_id],

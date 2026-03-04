@@ -328,7 +328,7 @@ class DuckLakeCatalogReader:
                    s.path, s.path_is_relative
             FROM ducklake_table t
             JOIN ducklake_schema s ON t.schema_id = s.schema_id
-            WHERE t.table_name = ?
+            WHERE LOWER(t.table_name) = LOWER(?)
               AND s.schema_name = ?
               AND ? >= t.begin_snapshot
               AND (? < t.end_snapshot OR t.end_snapshot IS NULL)
@@ -374,7 +374,7 @@ class DuckLakeCatalogReader:
               ON c.table_id = t.table_id
               AND ? >= c.begin_snapshot
               AND (? < c.end_snapshot OR c.end_snapshot IS NULL)
-            WHERE t.table_name = ?
+            WHERE LOWER(t.table_name) = LOWER(?)
               AND s.schema_name = ?
               AND ? >= t.begin_snapshot
               AND (? < t.end_snapshot OR t.end_snapshot IS NULL)
