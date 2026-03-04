@@ -32,6 +32,7 @@ __all__ = [
     "update_ducklake",
     "merge_ducklake",
     "create_table_as_ducklake",
+    "add_files_ducklake",
     "alter_ducklake_add_column",
     "alter_ducklake_drop_column",
     "alter_ducklake_rename_column",
@@ -559,6 +560,72 @@ def create_table_as_ducklake(
         commit_message=commit_message,
     ) as writer:
         writer.create_table_with_data(table, df, schema_name=schema)
+
+
+def add_files_ducklake(
+    path: str | Path,
+    table: str,
+    file_paths: list[str],
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+    max_retries: int = 3,
+    retry_wait_ms: float = 100,
+    retry_backoff: float = 2.0,
+) -> int:
+    """
+    Register existing Parquet files into a DuckLake table.
+
+    The files are **not** copied or moved — they are referenced
+    in-place. Schema validation is performed by reading the first
+    file's schema and comparing against the table's column definitions.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the target table.
+    file_paths
+        List of paths to Parquet files (local or object storage).
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    author
+        Author name for the snapshot change record.
+    commit_message
+        Commit message for the snapshot change record.
+
+    Returns
+    -------
+    int
+        The new snapshot ID.
+
+    Raises
+    ------
+    ValueError
+        If the table does not exist, no file paths are given, or
+        the Parquet schema does not match the table schema.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+        max_retries=max_retries,
+        retry_wait_ms=retry_wait_ms,
+        retry_backoff=retry_backoff,
+    ) as writer:
+        return writer.add_files(table, file_paths, schema_name=schema)
 
 
 def alter_ducklake_add_column(

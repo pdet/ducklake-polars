@@ -4660,6 +4660,160 @@ class DuckLakeCatalogWriter:
 
         self._commit_metadata()
 
+    # ------------------------------------------------------------------
+    # ADD FILES (register existing Parquet files)
+    # ------------------------------------------------------------------
+
+    @_retryable
+    def add_files(
+        self,
+        table_name: str,
+        file_paths: list[str],
+        *,
+        schema_name: str = "main",
+    ) -> int:
+        """Register existing Parquet files into a DuckLake table.
+
+        The files are **not** copied or moved — they are referenced
+        in-place.  Schema validation is performed by reading the first
+        file's schema and comparing against the table's column
+        definitions.
+
+        Parameters
+        ----------
+        table_name
+            Name of the target table.
+        file_paths
+            List of paths to Parquet files (local or object storage).
+        schema_name
+            Schema name (default: ``"main"``).
+
+        Returns
+        -------
+        int
+            The new snapshot ID.
+
+        Raises
+        ------
+        ValueError
+            If the table does not exist, no file paths are given, or
+            the Parquet schema does not match the table schema.
+        """
+        if not file_paths:
+            msg = "file_paths must not be empty"
+            raise ValueError(msg)
+
+        con = self._connect()
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id, schema_ver, next_cat_id, next_file_id = -1, 0, 1, 1
+        else:
+            snap_id, schema_ver, next_cat_id, next_file_id = snapshot_info
+        self._start_write_transaction(snap_id)
+
+        table_id, table_path, table_path_rel, schema_path, schema_path_rel = (
+            self._get_table_info(table_name, schema_name, snap_id)
+        )
+        self._track_table_write(table_id, "insert")
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+
+        # --- Validate schema from the first file ----------------------
+        first_table = storage.read_parquet(file_paths[0])
+        first_schema = first_table.schema
+        file_col_names = set(first_schema.names)
+        catalog_col_names = {c[1] for c in columns}
+        if file_col_names != catalog_col_names:
+            msg = (
+                f"Schema mismatch: file columns {sorted(file_col_names)} "
+                f"do not match table columns {sorted(catalog_col_names)}"
+            )
+            raise ValueError(msg)
+
+        # --- Allocate IDs ---------------------------------------------
+        n_files = len(file_paths)
+        new_next_file_id = next_file_id + n_files
+
+        existing_stats = self._get_table_stats(table_id)
+        row_id_start = existing_stats[1] if existing_stats is not None else 0
+
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, new_next_file_id)
+
+        mapping_id = self._register_name_mapping(table_id, columns)
+
+        total_records = 0
+        total_file_size = 0
+        current_file_id = next_file_id
+        current_row_id = row_id_start
+
+        for fpath in file_paths:
+            df = storage.read_parquet(fpath)
+            record_count = len(df)
+            file_size = storage.get_file_size(fpath)
+            footer_size = _read_parquet_footer_size(fpath)
+
+            # Register the file with an absolute path (path_is_relative=False)
+            self._register_data_file_absolute(
+                current_file_id, table_id, new_snap, fpath,
+                record_count, file_size, footer_size, current_row_id,
+                None, mapping_id,
+            )
+
+            col_stats = self._compute_file_column_stats(df, columns)
+            self._register_file_column_stats(current_file_id, table_id, col_stats)
+            self._update_table_column_stats(table_id, columns, col_stats)
+
+            total_records += record_count
+            total_file_size += file_size
+            current_file_id += 1
+            current_row_id += record_count
+
+        self._update_table_stats(table_id, total_records, total_file_size)
+
+        self._record_change(new_snap, f"inserted_into_table:{table_id}")
+        self._commit_metadata()
+        return new_snap
+
+    def _register_data_file_absolute(
+        self,
+        data_file_id: int,
+        table_id: int,
+        new_snap: int,
+        abs_path: str,
+        record_count: int,
+        file_size: int,
+        footer_size: int,
+        row_id_start: int,
+        partition_id: int | None,
+        mapping_id: int,
+    ) -> None:
+        """Register a data file with an absolute (non-relative) path."""
+        con = self._connect()
+        con.execute(
+            "INSERT INTO ducklake_data_file "
+            "(data_file_id, table_id, begin_snapshot, end_snapshot, file_order, "
+            "path, path_is_relative, file_format, record_count, file_size_bytes, "
+            "footer_size, row_id_start, partition_id, encryption_key, "
+            + ("mapping_id, partial_max) "
+               "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, ?, NULL)"
+               if self._is_v04 else
+               "partial_file_info, mapping_id) "
+               "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, NULL, ?)"),
+            [
+                data_file_id,
+                table_id,
+                new_snap,
+                abs_path,
+                False,  # path_is_relative = False
+                record_count,
+                file_size,
+                footer_size,
+                row_id_start,
+                partition_id,
+                mapping_id,
+            ],
+        )
+
     @staticmethod
     def _resolve_vacuum_path(
         file_path: str,

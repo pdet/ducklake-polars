@@ -240,6 +240,21 @@ class DuckLakeCatalogWriter:
         )
 
     # ------------------------------------------------------------------
+    # ADD FILES
+    # ------------------------------------------------------------------
+
+    def add_files(
+        self,
+        table_name: str,
+        file_paths: list[str],
+        *,
+        schema_name: str = "main",
+    ) -> int:
+        return self._core.add_files(
+            table_name, file_paths, schema_name=schema_name,
+        )
+
+    # ------------------------------------------------------------------
     # ALTER TABLE
     # ------------------------------------------------------------------
 
