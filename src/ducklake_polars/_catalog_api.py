@@ -181,6 +181,57 @@ class DuckLakeCatalog(_CoreCatalog):
         return pl.from_arrow(super().column_tags(table, column, schema=schema))
 
     # ------------------------------------------------------------------
+    # Macros
+    # ------------------------------------------------------------------
+
+    def list_macros(
+        self,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+    ) -> pl.DataFrame:
+        """
+        List all macros in a schema.
+
+        Returns a DataFrame with columns:
+        - ``macro_id`` (Int64)
+        - ``macro_name`` (String)
+        - ``macro_type`` (String) — ``"scalar"`` or ``"table"``
+        """
+        return pl.from_arrow(super().list_macros(schema=schema, snapshot_version=snapshot_version))
+
+    def get_macro(
+        self,
+        name: str,
+        *,
+        schema: str = "main",
+        dialect: str | None = None,
+        snapshot_version: int | None = None,
+    ) -> pl.DataFrame:
+        """
+        Get macro definition(s) by name.
+
+        Parameters
+        ----------
+        name
+            Macro name.
+        schema
+            Schema name (default: "main").
+        dialect
+            If provided, return only the implementation for this dialect.
+        snapshot_version
+            Snapshot version to query.
+
+        Returns a DataFrame with columns:
+        - ``macro_name`` (String)
+        - ``macro_type`` (String)
+        - ``dialect`` (String)
+        - ``sql`` (String) — the SQL definition
+        - ``parameters`` (String) — comma-separated parameter list
+        """
+        return pl.from_arrow(super().get_macro(name, schema=schema, dialect=dialect, snapshot_version=snapshot_version))
+
+    # ------------------------------------------------------------------
     # Change data feed
     # ------------------------------------------------------------------
 

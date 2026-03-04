@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from ducklake_pandas._catalog_api import DuckLakeCatalog
+from ducklake_core._catalog import DuckLakeCatalogReader
 from ducklake_core._writer import TransactionConflictError
 
 __all__ = [
@@ -50,6 +51,9 @@ __all__ = [
     "set_ducklake_column_tag",
     "delete_ducklake_table_tag",
     "delete_ducklake_column_tag",
+    "list_tables",
+    "list_snapshots",
+    "catalog_info",
     "DuckLakeCatalog",
 ]
 
@@ -1738,3 +1742,38 @@ def delete_ducklake_column_tag(
         author=author, commit_message=commit_message,
     ) as writer:
         writer.delete_column_tag(table, column, key, schema_name=schema)
+
+
+def list_tables(
+    path: str | Path,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """List all table names in a DuckLake catalog schema."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.list_tables(schema)
+
+
+def list_snapshots(
+    path: str | Path,
+    *,
+    limit: int = 20,
+    data_path: str | Path | None = None,
+) -> list[dict]:
+    """List recent snapshots from a DuckLake catalog."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.list_snapshots(limit=limit)
+
+
+def catalog_info(
+    path: str | Path,
+    *,
+    data_path: str | Path | None = None,
+) -> dict:
+    """Get catalog summary: version, data_path, table_count, snapshot_count."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.catalog_info()

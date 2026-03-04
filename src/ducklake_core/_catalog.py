@@ -148,6 +148,39 @@ class SortKeyDef:
     null_order: str  # "nulls_first" or "nulls_last"
 
 
+@dataclass
+class MacroInfo:
+    """Information about a DuckLake macro."""
+
+    macro_id: int
+    macro_name: str
+    schema_id: int
+
+
+@dataclass
+class MacroImplInfo:
+    """A single macro implementation (dialect-specific)."""
+
+    macro_id: int
+    impl_id: int
+    dialect: str
+    sql: str
+    macro_type: str  # "scalar" or "table"
+
+
+@dataclass
+class MacroParameterInfo:
+    """A parameter of a macro implementation."""
+
+    macro_id: int
+    impl_id: int
+    column_id: int
+    parameter_name: str
+    parameter_type: str
+    default_value: str | None
+    default_value_type: str | None
+
+
 class DuckLakeCatalogReader:
     """
     Reads metadata from a DuckLake catalog database.
@@ -275,6 +308,73 @@ class DuckLakeCatalogReader:
             schema_version=row[1],
             next_file_id=row[2],
         )
+
+    def list_tables(self, schema_name: str = "main") -> list[str]:
+        """List all table names in a schema at the current snapshot."""
+        con = self._connect()
+        snapshot = self.get_current_snapshot()
+        rows = con.execute(
+            self._sql("""
+            SELECT t.table_name
+            FROM ducklake_table t
+            JOIN ducklake_schema s ON t.schema_id = s.schema_id
+            WHERE LOWER(s.schema_name) = LOWER(?)
+              AND ? >= t.begin_snapshot
+              AND (? < t.end_snapshot OR t.end_snapshot IS NULL)
+              AND ? >= s.begin_snapshot
+              AND (? < s.end_snapshot OR s.end_snapshot IS NULL)
+            ORDER BY t.table_name
+            """),
+            [schema_name, snapshot.snapshot_id, snapshot.snapshot_id,
+             snapshot.snapshot_id, snapshot.snapshot_id],
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def list_snapshots(self, limit: int = 20) -> list[dict]:
+        """List recent snapshots ordered by id descending."""
+        con = self._connect()
+        rows = con.execute(
+            self._sql("""
+            SELECT snapshot_id, snapshot_time, schema_version
+            FROM ducklake_snapshot
+            ORDER BY snapshot_id DESC
+            LIMIT ?
+            """),
+            [limit],
+        ).fetchall()
+        return [
+            {"snapshot_id": r[0], "snapshot_time": r[1], "schema_version": r[2]}
+            for r in rows
+        ]
+
+    def catalog_info(self) -> dict:
+        """Get catalog summary information."""
+        con = self._connect()
+        version = self._catalog_version
+        data_path = self.data_path
+
+        snapshot_count = con.execute(
+            "SELECT COUNT(*) FROM ducklake_snapshot"
+        ).fetchone()[0]
+
+        snapshot = self.get_current_snapshot()
+        table_count = con.execute(
+            self._sql("""
+            SELECT COUNT(*)
+            FROM ducklake_table t
+            WHERE ? >= t.begin_snapshot
+              AND (? < t.end_snapshot OR t.end_snapshot IS NULL)
+            """),
+            [snapshot.snapshot_id, snapshot.snapshot_id],
+        ).fetchone()[0]
+
+        return {
+            "version": version,
+            "data_path": data_path,
+            "snapshot_count": snapshot_count,
+            "table_count": table_count,
+            "current_snapshot_id": snapshot.snapshot_id,
+        }
 
     def get_snapshot_at_version(self, version: int) -> SnapshotInfo:
         """Get snapshot info at a specific version."""
@@ -1144,3 +1244,95 @@ class DuckLakeCatalogReader:
             return None
 
         return pa.concat_tables(frames, promote_options="permissive")
+
+    # ------------------------------------------------------------------
+    # Macro support
+    # ------------------------------------------------------------------
+
+    def get_macros(self, schema_id: int, snapshot_id: int) -> list[MacroInfo]:
+        """Get all macros in a schema visible at a given snapshot."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT macro_id, macro_name, schema_id
+                FROM ducklake_macro
+                WHERE schema_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                ORDER BY macro_id
+                """),
+                [schema_id, snapshot_id, snapshot_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+        return [
+            MacroInfo(
+                macro_id=r[0],
+                macro_name=r[1],
+                schema_id=r[2],
+            )
+            for r in rows
+        ]
+
+    def get_macro_implementations(self, macro_id: int) -> list[MacroImplInfo]:
+        """Get all implementations for a macro."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT macro_id, impl_id, dialect, sql, type
+                FROM ducklake_macro_impl
+                WHERE macro_id = ?
+                ORDER BY impl_id
+                """),
+                [macro_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+        return [
+            MacroImplInfo(
+                macro_id=r[0],
+                impl_id=r[1],
+                dialect=r[2] or "",
+                sql=r[3] or "",
+                macro_type=r[4] or "scalar",
+            )
+            for r in rows
+        ]
+
+    def get_macro_parameters(self, macro_id: int, impl_id: int) -> list[MacroParameterInfo]:
+        """Get parameters for a specific macro implementation."""
+        con = self._connect()
+        try:
+            rows = con.execute(
+                self._sql("""
+                SELECT macro_id, impl_id, column_id, parameter_name,
+                       parameter_type, default_value, default_value_type
+                FROM ducklake_macro_parameters
+                WHERE macro_id = ?
+                  AND impl_id = ?
+                ORDER BY column_id
+                """),
+                [macro_id, impl_id],
+            ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+        return [
+            MacroParameterInfo(
+                macro_id=r[0],
+                impl_id=r[1],
+                column_id=r[2],
+                parameter_name=r[3] or "",
+                parameter_type=r[4] or "",
+                default_value=r[5],
+                default_value_type=r[6],
+            )
+            for r in rows
+        ]

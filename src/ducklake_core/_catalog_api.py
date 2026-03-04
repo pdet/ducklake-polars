@@ -708,6 +708,174 @@ class DuckLakeCatalog:
         return result.select(["snapshot_id", "change_type"] + other_cols)
 
     # ------------------------------------------------------------------
+    # Macros
+    # ------------------------------------------------------------------
+
+    def list_macros(
+        self,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+    ) -> pa.Table:
+        """
+        List all macros in a schema.
+
+        Returns a table with columns:
+        - ``macro_id`` (int64)
+        - ``macro_name`` (string)
+        - ``macro_type`` (string) — ``"scalar"`` or ``"table"``
+        """
+        lm_schema = pa.schema([
+            pa.field("macro_id", pa.int64()),
+            pa.field("macro_name", pa.string()),
+            pa.field("macro_type", pa.string()),
+        ])
+
+        with self._reader() as reader:
+            if snapshot_version is not None:
+                snap = reader.get_snapshot_at_version(snapshot_version)
+            else:
+                snap = reader.get_current_snapshot()
+
+            schemas = reader.get_all_schemas(snap.snapshot_id)
+            schema_row = None
+            for s in schemas:
+                if s[1] == schema:
+                    schema_row = s
+                    break
+            if schema_row is None:
+                return lm_schema.empty_table()
+
+            macros = reader.get_macros(schema_row[0], snap.snapshot_id)
+            if not macros:
+                return lm_schema.empty_table()
+
+            # Determine macro type from the first implementation
+            macro_ids = []
+            macro_names = []
+            macro_types = []
+            for m in macros:
+                impls = reader.get_macro_implementations(m.macro_id)
+                macro_type = impls[0].macro_type if impls else "scalar"
+                macro_ids.append(m.macro_id)
+                macro_names.append(m.macro_name)
+                macro_types.append(macro_type)
+
+        return pa.table(
+            {
+                "macro_id": pa.array(macro_ids, type=pa.int64()),
+                "macro_name": pa.array(macro_names, type=pa.string()),
+                "macro_type": pa.array(macro_types, type=pa.string()),
+            },
+            schema=lm_schema,
+        )
+
+    def get_macro(
+        self,
+        name: str,
+        *,
+        schema: str = "main",
+        dialect: str | None = None,
+        snapshot_version: int | None = None,
+    ) -> pa.Table:
+        """
+        Get macro definition(s) by name.
+
+        Parameters
+        ----------
+        name
+            Macro name.
+        schema
+            Schema name (default: "main").
+        dialect
+            If provided, return only the implementation for this dialect
+            (e.g., ``"duckdb"``). If None, return all implementations.
+        snapshot_version
+            Snapshot version to query. If None, use the latest snapshot.
+
+        Returns a table with columns:
+        - ``macro_name`` (string)
+        - ``macro_type`` (string) — ``"scalar"`` or ``"table"``
+        - ``dialect`` (string)
+        - ``sql`` (string) — the SQL definition
+        - ``parameters`` (string) — comma-separated parameter list
+          (e.g., ``"x INTEGER, y VARCHAR DEFAULT 'hello'"``).
+        """
+        gm_schema = pa.schema([
+            pa.field("macro_name", pa.string()),
+            pa.field("macro_type", pa.string()),
+            pa.field("dialect", pa.string()),
+            pa.field("sql", pa.string()),
+            pa.field("parameters", pa.string()),
+        ])
+
+        with self._reader() as reader:
+            if snapshot_version is not None:
+                snap = reader.get_snapshot_at_version(snapshot_version)
+            else:
+                snap = reader.get_current_snapshot()
+
+            schemas = reader.get_all_schemas(snap.snapshot_id)
+            schema_row = None
+            for s in schemas:
+                if s[1] == schema:
+                    schema_row = s
+                    break
+            if schema_row is None:
+                msg = f"Schema '{schema}' not found"
+                raise ValueError(msg)
+
+            macros = reader.get_macros(schema_row[0], snap.snapshot_id)
+            macro = None
+            for m in macros:
+                if m.macro_name.lower() == name.lower():
+                    macro = m
+                    break
+            if macro is None:
+                msg = f"Macro '{name}' not found in schema '{schema}'"
+                raise ValueError(msg)
+
+            impls = reader.get_macro_implementations(macro.macro_id)
+            if dialect is not None:
+                impls = [i for i in impls if i.dialect.lower() == dialect.lower()]
+
+            names = []
+            types = []
+            dialects = []
+            sqls = []
+            params_strs = []
+
+            for impl in impls:
+                params = reader.get_macro_parameters(macro.macro_id, impl.impl_id)
+                param_parts = []
+                for p in params:
+                    part = f"{p.parameter_name} {p.parameter_type}"
+                    if p.default_value is not None and p.default_value != "":
+                        part += f" DEFAULT {p.default_value}"
+                    param_parts.append(part)
+                params_str = ", ".join(param_parts)
+
+                names.append(macro.macro_name)
+                types.append(impl.macro_type)
+                dialects.append(impl.dialect)
+                sqls.append(impl.sql)
+                params_strs.append(params_str)
+
+        if not names:
+            return gm_schema.empty_table()
+
+        return pa.table(
+            {
+                "macro_name": pa.array(names, type=pa.string()),
+                "macro_type": pa.array(types, type=pa.string()),
+                "dialect": pa.array(dialects, type=pa.string()),
+                "sql": pa.array(sqls, type=pa.string()),
+                "parameters": pa.array(params_strs, type=pa.string()),
+            },
+            schema=gm_schema,
+        )
+
+    # ------------------------------------------------------------------
     # Sort keys
     # ------------------------------------------------------------------
 
