@@ -385,6 +385,16 @@ class DuckLakeCatalogWriter:
     # MAINTENANCE
     # ------------------------------------------------------------------
 
+    def rewrite_data_files(
+        self,
+        table_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> int:
+        return self._core.rewrite_data_files(
+            table_name, schema_name=schema_name,
+        )
+
     def expire_snapshots(
         self,
         *,

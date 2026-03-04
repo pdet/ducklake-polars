@@ -46,6 +46,7 @@ __all__ = [
     "rename_ducklake_table",
     "expire_snapshots",
     "vacuum_ducklake",
+    "rewrite_data_files_ducklake",
     "create_ducklake_view",
     "drop_ducklake_view",
     "set_ducklake_table_tag",
@@ -1287,6 +1288,63 @@ def vacuum_ducklake(
 
     with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
         return writer.vacuum()
+
+
+def rewrite_data_files_ducklake(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+    max_retries: int = 3,
+    retry_wait_ms: float = 100,
+    retry_backoff: float = 2.0,
+) -> int:
+    """
+    Rewrite data files for compaction — merge small files, remove deleted rows.
+
+    Reads all active data files for a table (respecting deletion vectors),
+    writes consolidated Parquet files, and updates the catalog atomically.
+    Old data files and deletion vectors are replaced in a single snapshot.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the table to compact.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    author
+        Author name for the snapshot change record.
+    commit_message
+        Commit message for the snapshot change record.
+
+    Returns
+    -------
+    int
+        The new snapshot ID, or ``-1`` if no rewrite was needed.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+        max_retries=max_retries,
+        retry_wait_ms=retry_wait_ms,
+        retry_backoff=retry_backoff,
+    ) as writer:
+        return writer.rewrite_data_files(table, schema_name=schema)
 
 
 def set_ducklake_table_tag(

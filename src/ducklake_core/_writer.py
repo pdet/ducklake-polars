@@ -2322,7 +2322,7 @@ class DuckLakeCatalogWriter:
         )
         if deleted_positions:
             keep_indices = [i for i in range(len(df)) if i not in deleted_positions]
-            df = df.take(pa.array(keep_indices))
+            df = df.take(pa.array(keep_indices, type=pa.int64()))
         return df
 
     def _write_cumulative_delete_file(
@@ -4170,6 +4170,231 @@ class DuckLakeCatalogWriter:
 
         self._record_change(new_snap, f"altered_table:{table_id}")
         self._commit_metadata()
+
+    # ------------------------------------------------------------------
+    # REWRITE DATA FILES (compaction)
+    # ------------------------------------------------------------------
+
+    @_retryable
+    def rewrite_data_files(
+        self,
+        table_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> int:
+        """Rewrite data files for compaction — merge small files, remove deleted rows.
+
+        Reads all active data files for a table, respecting deletion
+        vectors, and writes a single consolidated Parquet file (or one
+        per partition).  Old data files and delete files are marked as
+        ended and new files are registered — all within a single
+        snapshot.
+
+        Returns the new snapshot ID, or ``-1`` if no rewrite was needed
+        (e.g., the table has zero or one active data file with no
+        deletion vectors).
+        """
+        con = self._connect()
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id, schema_ver, next_cat_id, next_file_id = -1, 0, 1, 1
+        else:
+            snap_id, schema_ver, next_cat_id, next_file_id = snapshot_info
+        self._start_write_transaction(snap_id)
+
+        table_id, table_path, table_path_rel, schema_path, schema_path_rel = (
+            self._get_table_info(table_name, schema_name, snap_id)
+        )
+        self._track_table_write(table_id, "insert")
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        data_files = self._get_active_data_files(table_id, snap_id)
+
+        # Check if any file has deletion vectors
+        has_deletes = False
+        for data_file_id, _path, _rel, _rc, _rid in data_files:
+            positions = self._get_active_delete_positions(
+                data_file_id, table_id, snap_id,
+                table_path, table_path_rel, schema_path, schema_path_rel,
+            )
+            if positions:
+                has_deletes = True
+                break
+
+        # No rewrite needed: single file without deletes (or no files)
+        if len(data_files) <= 1 and not has_deletes:
+            return -1
+
+        # Read all active data, respecting deletion vectors
+        all_dfs: list[pa.Table] = []
+        for data_file_id, rel_path, path_is_rel, _rc, _rid in data_files:
+            abs_path = self._resolve_file_path(
+                rel_path, path_is_rel,
+                table_path, table_path_rel,
+                schema_path, schema_path_rel,
+            )
+            active_df = self._read_active_data_file(
+                data_file_id, abs_path, table_id, snap_id,
+                table_path, table_path_rel, schema_path, schema_path_rel,
+            )
+            if len(active_df) > 0:
+                all_dfs.append(active_df)
+
+        if all_dfs:
+            combined = pa.concat_tables(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
+        else:
+            combined = pa.table(
+                {c[1]: pa.array([], type=pa.string()) for c in columns}
+            )
+
+        total_records = len(combined)
+
+        # Resolve the base directory for writing new files
+        base = self.data_path
+        if schema_path_rel:
+            base = storage.join_path(base, schema_path)
+        else:
+            base = schema_path
+        if table_path_rel:
+            base = storage.join_path(base, table_path)
+        else:
+            base = table_path
+        storage.makedirs(base, exist_ok=True)
+
+        # Check for partitioning
+        part_id = self._get_active_partition(table_id, snap_id)
+
+        if part_id is not None and total_records > 0:
+            part_cols = self._get_partition_columns(part_id, table_id)
+            col_id_to_name: dict[int, str] = {c[0]: c[1] for c in columns}
+            part_col_names = [col_id_to_name[col_id] for _, col_id, _ in part_cols]
+            part_key_indices = [ki for ki, _, _ in part_cols]
+            group_list = _group_by_columns(combined, part_col_names)
+            n_new_files = len(group_list)
+        else:
+            n_new_files = 1 if total_records > 0 else 0
+            group_list = []
+            part_col_names = []
+            part_key_indices = []
+
+        new_next_file_id = next_file_id + n_new_files
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, new_next_file_id)
+
+        # End all old data files and delete files
+        self._end_all_data_files(table_id, snap_id, new_snap)
+        self._end_all_delete_files(table_id, snap_id, new_snap)
+
+        # Sort by sort keys if defined
+        sort_keys = self._get_active_sort_keys(table_id, snap_id)
+
+        if total_records > 0:
+            mapping_id = self._register_name_mapping(table_id, columns)
+
+            if part_id is not None and group_list:
+                total_file_size = 0
+                current_file_id = next_file_id
+                current_row_id = 0
+
+                for group_key, group_df in group_list:
+                    if sort_keys:
+                        group_df = self._sort_table_by_keys(group_df, sort_keys)
+
+                    partition_values = [str(v) for v in group_key]
+                    hive_subdir = self._build_hive_path(part_col_names, partition_values)
+                    partition_dir = storage.join_path(base, hive_subdir)
+                    storage.makedirs(partition_dir, exist_ok=True)
+
+                    file_name = f"ducklake-{_uuid7()}.parquet"
+                    file_path = storage.join_path(partition_dir, file_name)
+                    storage.write_parquet(group_df, file_path)
+
+                    file_size = storage.get_file_size(file_path)
+                    footer_size = _read_parquet_footer_size(file_path)
+                    record_count = len(group_df)
+                    rel_path = f"{hive_subdir}/{file_name}"
+
+                    self._register_data_file(
+                        current_file_id, table_id, new_snap, rel_path,
+                        record_count, file_size, footer_size, current_row_id,
+                        part_id, mapping_id,
+                    )
+                    self._register_partition_values(
+                        current_file_id, table_id, part_key_indices, partition_values,
+                    )
+
+                    col_stats = self._compute_file_column_stats(group_df, columns)
+                    self._register_file_column_stats(current_file_id, table_id, col_stats)
+
+                    total_file_size += file_size
+                    current_file_id += 1
+                    current_row_id += record_count
+            else:
+                # Non-partitioned: write a single consolidated file
+                if sort_keys:
+                    combined = self._sort_table_by_keys(combined, sort_keys)
+
+                file_name = f"ducklake-{_uuid7()}.parquet"
+                file_path = storage.join_path(base, file_name)
+                storage.write_parquet(combined, file_path)
+
+                file_size = storage.get_file_size(file_path)
+                footer_size = _read_parquet_footer_size(file_path)
+
+                data_file_id = next_file_id
+
+                self._register_data_file(
+                    data_file_id, table_id, new_snap, file_name,
+                    total_records, file_size, footer_size, 0,
+                    None, mapping_id,
+                )
+
+                col_stats = self._compute_file_column_stats(combined, columns)
+                self._register_file_column_stats(data_file_id, table_id, col_stats)
+
+                total_file_size = file_size
+
+            # Rebuild table stats from scratch
+            con.execute(
+                "UPDATE ducklake_table_stats "
+                "SET record_count = ?, next_row_id = ?, file_size_bytes = ? "
+                "WHERE table_id = ?",
+                [total_records, total_records, total_file_size, table_id],
+            )
+
+            # Rebuild column stats from scratch
+            con.execute(
+                "DELETE FROM ducklake_table_column_stats WHERE table_id = ?",
+                [table_id],
+            )
+            full_col_stats = self._compute_file_column_stats(combined, columns)
+            for col_id, _col_name, _vc, null_count, min_val, max_val, nan_int in full_col_stats:
+                contains_null = bool(null_count and null_count > 0)
+                con.execute(
+                    "INSERT INTO ducklake_table_column_stats "
+                    "(table_id, column_id, contains_null, contains_nan, "
+                    "min_value, max_value, extra_stats) "
+                    "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                    [table_id, col_id, contains_null, nan_int, min_val, max_val],
+                )
+        else:
+            # All rows were deleted — reset stats
+            con.execute(
+                "UPDATE ducklake_table_stats "
+                "SET record_count = 0, next_row_id = 0, file_size_bytes = 0 "
+                "WHERE table_id = ?",
+                [table_id],
+            )
+            con.execute(
+                "DELETE FROM ducklake_table_column_stats WHERE table_id = ?",
+                [table_id],
+            )
+
+        self._record_change(
+            new_snap,
+            f"inserted_into_table:{table_id},deleted_from_table:{table_id}",
+        )
+        self._commit_metadata()
+        return new_snap
 
     # ------------------------------------------------------------------
     # EXPIRE SNAPSHOTS
