@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import ducklake_core._storage as storage
 from ducklake_core._backend import create_backend
+from ducklake_core._exceptions import CatalogVersionError, SchemaNotFoundError, TableNotFoundError
 
 import pyarrow as pa
 
@@ -185,13 +186,13 @@ class DuckLakeCatalogReader:
         version = meta.get("version")
         if version is None:
             msg = "No version found in ducklake_metadata — is this a valid DuckLake catalog?"
-            raise ValueError(msg)
+            raise CatalogVersionError(msg)
         if version not in SUPPORTED_DUCKLAKE_VERSIONS:
             msg = (
                 f"Unsupported DuckLake catalog version '{version}'. "
                 f"Supported versions: {', '.join(sorted(SUPPORTED_DUCKLAKE_VERSIONS))}"
             )
-            raise ValueError(msg)
+            raise CatalogVersionError(msg)
         self._catalog_version = version
         if self._data_path_override is None and "data_path" in meta:
             self._data_path = meta["data_path"]
@@ -339,7 +340,7 @@ class DuckLakeCatalogReader:
         ).fetchone()
         if row is None:
             msg = f"Table '{schema_name}.{table_name}' not found at snapshot {snapshot_id}"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         return TableInfo(
             table_id=row[0],
             table_name=row[1],
@@ -391,7 +392,7 @@ class DuckLakeCatalogReader:
         ).fetchall()
         if not rows:
             msg = f"Table '{schema_name}.{table_name}' not found at snapshot {snapshot_id}"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
 
         # Extract table info from the first row
         r0 = rows[0]
