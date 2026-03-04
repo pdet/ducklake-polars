@@ -54,6 +54,7 @@ __all__ = [
     "list_tables",
     "list_views",
     "get_view",
+    "table_info",
     "list_snapshots",
     "catalog_info",
     "DuckLakeCatalog",
@@ -1804,3 +1805,16 @@ def get_view(
     dp = os.fspath(data_path) if data_path is not None else None
     with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
         return reader.get_view(name, schema)
+
+
+def table_info(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> list[dict]:
+    """Get column info for a table: name, type, nullable, order."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.table_info(table, schema)
