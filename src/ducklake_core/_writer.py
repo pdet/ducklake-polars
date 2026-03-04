@@ -26,6 +26,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import ducklake_core._storage as storage
 from ducklake_core._backend import PostgreSQLBackend, SQLiteBackend, create_backend
+from ducklake_core._exceptions import SchemaNotFoundError, TableNotFoundError
 from ducklake_core._schema import arrow_type_to_duckdb, duckdb_type_to_arrow
 
 
@@ -1044,7 +1045,7 @@ class DuckLakeCatalogWriter:
         ).fetchone()
         if row is None:
             msg = f"Schema '{schema_name}' not found at snapshot {snapshot_id}"
-            raise ValueError(msg)
+            raise SchemaNotFoundError(msg)
         return (row[0], row[1] or "", bool(row[2]) if row[2] is not None else True)
 
     # ------------------------------------------------------------------
@@ -1390,7 +1391,7 @@ class DuckLakeCatalogWriter:
         ).fetchone()
         if row is None:
             msg = f"Table '{schema_name}.{table_name}' not found at snapshot {snapshot_id}"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         return (
             row[0],
             row[1] or "",
@@ -3237,7 +3238,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -3305,7 +3306,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -3407,7 +3408,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -3507,7 +3508,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "drop_table")
 
         new_schema_ver = schema_ver + 1
@@ -3626,7 +3627,7 @@ class DuckLakeCatalogWriter:
         schema_id = self._schema_exists(schema_name, snap_id)
         if schema_id is None:
             msg = f"Schema '{schema_name}' not found"
-            raise ValueError(msg)
+            raise SchemaNotFoundError(msg)
 
         tables = self._get_tables_in_schema(schema_id, snap_id)
 
@@ -3696,7 +3697,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(old_table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{old_table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         if self._table_exists(new_table_name, schema_name, snap_id) is not None:
@@ -3785,7 +3786,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -3874,7 +3875,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -4059,7 +4060,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         columns = self._get_columns_for_table(table_id, snap_id)
@@ -4149,7 +4150,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
         # Check if there are active sort keys
@@ -4518,7 +4519,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
 
         new_snap = self._create_snapshot(schema_ver, next_cat_id, next_file_id)
 
@@ -4562,7 +4563,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
 
         # Check that the tag exists
         row = con.execute(
@@ -4609,7 +4610,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
 
         columns = self._get_columns_for_table(table_id, snap_id)
         col_id = None
@@ -4666,7 +4667,7 @@ class DuckLakeCatalogWriter:
         table_id = self._table_exists(table_name, schema_name, snap_id)
         if table_id is None:
             msg = f"Table '{schema_name}.{table_name}' not found"
-            raise ValueError(msg)
+            raise TableNotFoundError(msg)
 
         columns = self._get_columns_for_table(table_id, snap_id)
         col_id = None
