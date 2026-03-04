@@ -428,6 +428,42 @@ class DuckLakeCatalogReader:
             for c in sorted(columns, key=lambda c: c.column_order)
         ]
 
+    def snapshot_changes(self, snapshot_id: int | None = None) -> list[dict]:
+        """Get changes made in a snapshot (or all snapshots)."""
+        con = self._connect()
+        if snapshot_id is not None:
+            rows = con.execute(
+                self._sql("""
+                SELECT sc.snapshot_id, sc.changes_made, sc.author, sc.commit_message,
+                       s.snapshot_time
+                FROM ducklake_snapshot_changes sc
+                JOIN ducklake_snapshot s ON sc.snapshot_id = s.snapshot_id
+                WHERE sc.snapshot_id = ?
+                ORDER BY sc.snapshot_id
+                """),
+                [snapshot_id],
+            ).fetchall()
+        else:
+            rows = con.execute(
+                self._sql("""
+                SELECT sc.snapshot_id, sc.changes_made, sc.author, sc.commit_message,
+                       s.snapshot_time
+                FROM ducklake_snapshot_changes sc
+                JOIN ducklake_snapshot s ON sc.snapshot_id = s.snapshot_id
+                ORDER BY sc.snapshot_id
+                """),
+            ).fetchall()
+        return [
+            {
+                "snapshot_id": r[0],
+                "change": r[1],
+                "author": r[2],
+                "message": r[3],
+                "time": r[4],
+            }
+            for r in rows
+        ]
+
     def list_snapshots(self, limit: int = 20) -> list[dict]:
         """List recent snapshots ordered by id descending."""
         con = self._connect()

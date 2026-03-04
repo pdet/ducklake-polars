@@ -60,6 +60,7 @@ __all__ = [
     "get_view",
     "table_info",
     "list_snapshots",
+    "snapshot_changes",
     "catalog_info",
     "DuckLakeCatalog",
 ]
@@ -1560,6 +1561,18 @@ def list_snapshots(
     dp = os.fspath(data_path) if data_path is not None else None
     with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
         return reader.list_snapshots(limit=limit)
+
+
+def snapshot_changes(
+    path: str | Path,
+    *,
+    snapshot_id: int | None = None,
+    data_path: str | Path | None = None,
+) -> list[dict]:
+    """Get changes for a specific snapshot or all snapshots."""
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
+        return reader.snapshot_changes(snapshot_id=snapshot_id)
 
 
 def catalog_info(
