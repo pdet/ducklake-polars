@@ -181,6 +181,46 @@ class DuckLakeCatalog(_CoreCatalog):
         return super().column_tags(table, column, schema=schema).to_pandas()
 
     # ------------------------------------------------------------------
+    # Macros
+    # ------------------------------------------------------------------
+
+    def list_macros(
+        self,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        List all macros in a schema.
+
+        Returns a DataFrame with columns:
+        - ``macro_id`` (int64)
+        - ``macro_name`` (object/string)
+        - ``macro_type`` (object/string) — ``"scalar"`` or ``"table"``
+        """
+        return super().list_macros(schema=schema, snapshot_version=snapshot_version).to_pandas()
+
+    def get_macro(
+        self,
+        name: str,
+        *,
+        schema: str = "main",
+        dialect: str | None = None,
+        snapshot_version: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Get macro definition(s) by name.
+
+        Returns a DataFrame with columns:
+        - ``macro_name`` (object/string)
+        - ``macro_type`` (object/string)
+        - ``dialect`` (object/string)
+        - ``sql`` (object/string) — the SQL definition
+        - ``parameters`` (object/string) — comma-separated parameter list
+        """
+        return super().get_macro(name, schema=schema, dialect=dialect, snapshot_version=snapshot_version).to_pandas()
+
+    # ------------------------------------------------------------------
     # Change data feed
     # ------------------------------------------------------------------
 

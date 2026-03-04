@@ -50,6 +50,8 @@ __all__ = [
     "set_ducklake_column_tag",
     "delete_ducklake_table_tag",
     "delete_ducklake_column_tag",
+    "list_macros",
+    "get_macro",
     "DuckLakeCatalog",
 ]
 
@@ -1738,3 +1740,74 @@ def delete_ducklake_column_tag(
         author=author, commit_message=commit_message,
     ) as writer:
         writer.delete_column_tag(table, column, key, schema_name=schema)
+
+
+def list_macros(
+    path: str | Path,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    List all macros in a DuckLake catalog schema.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db),
+        or a PostgreSQL connection string.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: ``macro_id``, ``macro_name``, ``macro_type``.
+    """
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalog(os.fspath(path), data_path=dp) as cat:
+        return cat.list_macros(schema=schema)
+
+
+def get_macro(
+    path: str | Path,
+    name: str,
+    *,
+    schema: str = "main",
+    dialect: str | None = None,
+    data_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Get macro definition(s) by name from a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db),
+        or a PostgreSQL connection string.
+    name
+        Macro name.
+    schema
+        Schema name (default: "main").
+    dialect
+        If provided, return only the implementation for this dialect
+        (e.g., ``"duckdb"``). If None, return all implementations.
+    data_path
+        Override the data path stored in the catalog.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: ``macro_name``, ``macro_type``, ``dialect``,
+        ``sql``, ``parameters``.
+
+    Raises
+    ------
+    ValueError
+        If the macro or schema is not found.
+    """
+    dp = os.fspath(data_path) if data_path is not None else None
+    with DuckLakeCatalog(os.fspath(path), data_path=dp) as cat:
+        return cat.get_macro(name, schema=schema, dialect=dialect)
