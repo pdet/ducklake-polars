@@ -4242,7 +4242,7 @@ class DuckLakeCatalogWriter:
                 all_dfs.append(active_df)
 
         if all_dfs:
-            combined = pa.concat_tables(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
+            combined = pa.concat_tables(all_dfs, promote_options="default") if len(all_dfs) > 1 else all_dfs[0]
         else:
             combined = pa.table(
                 {c[1]: pa.array([], type=pa.string()) for c in columns}
