@@ -62,7 +62,6 @@ class TestCompactionAfterAlterTable:
         assert result.shape[0] == 4
         assert set(result.columns) == {"a", "b"}
 
-    @pytest.mark.xfail(reason="rewrite_data_files does not apply column rename mapping to old files")
     def test_rewrite_after_rename_column(self, make_write_catalog):
         cat = make_write_catalog()
         df1 = pl.DataFrame({"old_name": [1, 2, 3]})

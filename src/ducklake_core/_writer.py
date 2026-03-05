@@ -4226,6 +4226,44 @@ class DuckLakeCatalogWriter:
         if len(data_files) <= 1 and not has_deletes:
             return -1
 
+        # Build column rename mapping for schema evolution
+        # Get column history: all column definitions across all snapshots
+        col_history_rows = con.execute(
+            "SELECT column_id, column_name, begin_snapshot, end_snapshot "
+            "FROM ducklake_column "
+            "WHERE table_id = ? AND parent_column IS NULL "
+            "ORDER BY column_id, begin_snapshot",
+            [table_id],
+        ).fetchall()
+
+        # Current column names (at latest snapshot)
+        current_col_names = {c[1] for c in columns}
+        current_col_map = {c[0]: c[1] for c in columns}  # col_id -> current_name
+
+        # For each file, get its begin_snapshot
+        file_begin_snaps = {}
+        for data_file_id, _path, _rel, _rc, _rid in data_files:
+            row = con.execute(
+                "SELECT begin_snapshot FROM ducklake_data_file WHERE data_file_id = ?",
+                [data_file_id],
+            ).fetchone()
+            if row:
+                file_begin_snaps[data_file_id] = row[0]
+
+        def _build_rename_map(file_begin_snap: int) -> dict[str, str]:
+            """Build {physical_name -> current_name} for a file written at file_begin_snap."""
+            rename: dict[str, str] = {}
+            for col_id, current_name in current_col_map.items():
+                # Find the column name at file_begin_snap
+                for ch_id, ch_name, ch_begin, ch_end in col_history_rows:
+                    if ch_id != col_id:
+                        continue
+                    if ch_begin <= file_begin_snap and (ch_end is None or ch_end > file_begin_snap):
+                        if ch_name != current_name:
+                            rename[ch_name] = current_name
+                        break
+            return rename
+
         # Read all active data, respecting deletion vectors
         all_dfs: list[pa.Table] = []
         for data_file_id, rel_path, path_is_rel, _rc, _rid in data_files:
@@ -4239,6 +4277,16 @@ class DuckLakeCatalogWriter:
                 table_path, table_path_rel, schema_path, schema_path_rel,
             )
             if len(active_df) > 0:
+                # Apply column rename mapping
+                begin_snap = file_begin_snaps.get(data_file_id, 0)
+                rename_map = _build_rename_map(begin_snap)
+                if rename_map:
+                    new_names = [rename_map.get(c, c) for c in active_df.column_names]
+                    active_df = active_df.rename_columns(new_names)
+                # Drop columns that are no longer in the current schema
+                keep_cols = [c for c in active_df.column_names if c in current_col_names]
+                if len(keep_cols) < len(active_df.column_names):
+                    active_df = active_df.select(keep_cols)
                 all_dfs.append(active_df)
 
         if all_dfs:
