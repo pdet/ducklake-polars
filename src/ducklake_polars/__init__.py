@@ -185,6 +185,24 @@ def read_ducklake(
     return lf.collect()
 
 
+def _merge_schema(writer, df, table: str, schema: str, snap_id: int) -> None:
+    """Auto-merge DataFrame schema into existing table schema.
+
+    Adds columns present in df but missing in table.
+    Columns present in table but missing in df are left as-is (NULL on write).
+    """
+    import polars as pl
+
+    table_id = writer._table_exists(table, schema, snap_id)
+    if table_id is None:
+        return
+    existing_cols = writer._get_columns_for_table(table_id, snap_id)
+    existing_names = {col[1] for col in existing_cols}  # col = (col_id, col_name, ...)
+    for col_name, col_type in df.schema.items():
+        if col_name not in existing_names:
+            writer.add_column(table, col_name, col_type, schema_name=schema)
+
+
 def write_ducklake(
     df: pl.DataFrame,
     path: str | Path,
@@ -199,6 +217,7 @@ def write_ducklake(
     max_retries: int = 3,
     retry_wait_ms: float = 100,
     retry_backoff: float = 2.0,
+    schema_evolution: str = "strict",
 ) -> None:
     """
     Write a Polars DataFrame to a DuckLake table.
@@ -221,6 +240,12 @@ def write_ducklake(
           table if it does not exist.
         - ``"overwrite"``: Replace all data in the table. Creates the
           table if it does not exist.
+    schema_evolution
+        How to handle schema mismatches on append:
+        - ``"strict"`` (default): Fail if DataFrame schema doesn't match table.
+        - ``"merge"``: Auto-add new columns from the DataFrame to the table
+          (existing rows get NULL). Ignores missing columns (table columns
+          not in DataFrame get NULL for the new rows).
     data_path
         Override the data path stored in the catalog.
     data_inlining_row_limit
@@ -272,6 +297,8 @@ def write_ducklake(
         elif mode == "append":
             if table_id is None:
                 writer.create_table(table, dict(df.schema), schema_name=schema)
+            elif schema_evolution == "merge":
+                _merge_schema(writer, df, table, schema, snap_id)
             if not df.is_empty():
                 writer.insert_data(df, table, schema_name=schema)
 
