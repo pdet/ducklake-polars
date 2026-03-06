@@ -76,6 +76,28 @@ python benchmarks/bench_dml.py --rows 500000 --delete-rounds 50
 | Delete Cascade | Many small deletes accumulating delete files |
 | Read Degradation | Read before vs after compaction (DuckLake only) |
 
+### `bench_backends.py` — Catalog Backend Comparison
+
+Compares DuckLake performance across catalog backends: SQLite, DuckDB, and PostgreSQL (when available). Determines which backend to use for best performance.
+
+```bash
+python benchmarks/bench_backends.py                                    # Default: 100K rows, 50 appends (SQLite + DuckDB)
+python benchmarks/bench_backends.py --rows 500000 --appends 100
+python benchmarks/bench_backends.py --pg-dsn "postgresql://user:pass@localhost/testdb"  # Include PostgreSQL
+```
+
+| Scenario | Description |
+|----------|-------------|
+| Cold Start | Create catalog + table + insert + read (end-to-end) |
+| Sequential Writes | N appends measuring catalog commit overhead |
+| Read After Writes | Read performance with N accumulated snapshots |
+| Schema Evolution | ADD + RENAME column DDL cost |
+| Scan + Filter | Predicate pushdown with 5 data files |
+| Snapshot History | List snapshots from catalog |
+| Mixed Workload | Interleaved write + read cycles |
+
+> **Result:** SQLite is 4–18× faster than DuckDB for catalog operations. All DuckLake vs Iceberg benchmarks use SQLite (the fastest backend).
+
 ### `bench_catalog.py` — DuckLake vs Iceberg: Catalog & Metadata
 
 Pure metadata operations: catalog startup, table listing, snapshot history, time travel, and partition pruning.
