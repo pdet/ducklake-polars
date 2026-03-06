@@ -425,7 +425,7 @@ Test suite: **590+ tests** (5 xfailed for known DuckDB/Polars limitations). Test
 
 ### Benchmarks
 
-Five benchmark suites for self-tracking regression detection and DuckLake vs [PyIceberg](https://py.iceberg.apache.org/) comparison:
+Six benchmark suites for self-tracking regression detection and DuckLake vs [PyIceberg](https://py.iceberg.apache.org/) comparison:
 
 | Benchmark | What it measures |
 |---|---|
@@ -434,6 +434,7 @@ Five benchmark suites for self-tracking regression detection and DuckLake vs [Py
 | [`bench_schema_evolution.py`](benchmarks/bench_schema_evolution.py) | DDL cost: add/rename/drop columns, read after evolution, wide table projection |
 | [`bench_dml.py`](benchmarks/bench_dml.py) | Delete, update, merge/upsert, delete cascade, read degradation vs compaction |
 | [`bench_catalog.py`](benchmarks/bench_catalog.py) | Metadata ops: cold start, snapshot history, multi-table listing, partition pruning, time travel |
+| [`bench_backends.py`](benchmarks/bench_backends.py) | Catalog backend comparison: SQLite vs DuckDB vs PostgreSQL across all operations |
 
 ```bash
 # Quick examples
@@ -442,6 +443,7 @@ python benchmarks/bench_streaming.py --batches 100 --batch-size 1000
 python benchmarks/bench_schema_evolution.py --evolutions 50 --rows 100000
 python benchmarks/bench_dml.py --rows 100000 --delete-rounds 20
 python benchmarks/bench_catalog.py --snapshots 100 --rows 50000
+python benchmarks/bench_backends.py --rows 100000 --appends 50
 ```
 
 All comparison benchmarks use the same data and workloads for both systems. See [`benchmarks/README.md`](benchmarks/README.md) for detailed scenario descriptions and interpretation guidance.
