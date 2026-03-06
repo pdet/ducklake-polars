@@ -299,3 +299,344 @@ class DuckLakeCatalog(_CoreCatalog):
         insertions become ``update_postimage``.
         """
         return pl.from_arrow(super().table_changes(table, start_version, end_version, schema=schema))
+
+    # ------------------------------------------------------------------
+    # Sort keys
+    # ------------------------------------------------------------------
+
+    def sort_keys(
+        self, table: str, *, schema: str = "main"
+    ) -> pl.DataFrame:
+        """
+        Get sort keys for a table.
+
+        Returns a DataFrame with columns:
+        - ``column_name`` (String)
+        - ``sort_order`` (String) — ``'ASC'`` or ``'DESC'``
+        """
+        return pl.from_arrow(super().sort_keys(table, schema=schema))
+
+    # ------------------------------------------------------------------
+    # Views
+    # ------------------------------------------------------------------
+
+    def list_views(
+        self, *, schema: str = "main", snapshot_version: int | None = None
+    ) -> pl.DataFrame:
+        """List views in a schema."""
+        return pl.from_arrow(
+            super().list_views(schema=schema, snapshot_version=snapshot_version)
+        )
+
+    def get_view(
+        self,
+        name: str,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+    ) -> pl.DataFrame:
+        """Get view definition."""
+        return pl.from_arrow(
+            super().get_view(name, schema=schema, snapshot_version=snapshot_version)
+        )
+
+    # ==================================================================
+    # Write operations — stateful wrappers around free functions
+    # ==================================================================
+
+    def scan(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+        snapshot_time: str | None = None,
+    ) -> pl.LazyFrame:
+        """Lazy scan a table. Returns a Polars LazyFrame with pushdown."""
+        from ducklake_polars import scan_ducklake
+
+        return scan_ducklake(
+            self._metadata_path,
+            table,
+            schema=schema,
+            snapshot_version=snapshot_version,
+            snapshot_time=snapshot_time,
+            data_path=self._data_path_override,
+        )
+
+    def read(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+        snapshot_version: int | None = None,
+        snapshot_time: str | None = None,
+    ) -> pl.DataFrame:
+        """Read a table eagerly. Returns a Polars DataFrame."""
+        from ducklake_polars import read_ducklake
+
+        return read_ducklake(
+            self._metadata_path,
+            table,
+            schema=schema,
+            snapshot_version=snapshot_version,
+            snapshot_time=snapshot_time,
+            data_path=self._data_path_override,
+        )
+
+    def write(
+        self,
+        table: str,
+        df: pl.DataFrame,
+        *,
+        schema: str = "main",
+        mode: str = "error",
+        data_inlining_row_limit: int = 0,
+        author: str | None = None,
+        commit_message: str | None = None,
+    ) -> None:
+        """Write a DataFrame to a table."""
+        from ducklake_polars import write_ducklake
+
+        write_ducklake(
+            df,
+            self._metadata_path,
+            table,
+            schema=schema,
+            mode=mode,
+            data_path=self._data_path_override,
+            data_inlining_row_limit=data_inlining_row_limit,
+            author=author,
+            commit_message=commit_message,
+        )
+
+    def delete(
+        self,
+        table: str,
+        predicate: pl.Expr,
+        *,
+        schema: str = "main",
+    ) -> int:
+        """Delete rows matching predicate. Returns deleted row count."""
+        from ducklake_polars import delete_ducklake
+
+        return delete_ducklake(
+            self._metadata_path,
+            table,
+            predicate,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def update(
+        self,
+        table: str,
+        updates: dict[str, object],
+        predicate: pl.Expr,
+        *,
+        schema: str = "main",
+    ) -> int:
+        """Update rows matching predicate. Returns updated row count."""
+        from ducklake_polars import update_ducklake
+
+        return update_ducklake(
+            self._metadata_path,
+            table,
+            updates,
+            predicate,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def merge(
+        self,
+        table: str,
+        source_df: pl.DataFrame,
+        on: str | list[str],
+        *,
+        schema: str = "main",
+        when_matched_update: dict[str, object] | bool | None = True,
+        when_not_matched_insert: bool = True,
+    ) -> dict:
+        """Merge (upsert) source into target table."""
+        from ducklake_polars import merge_ducklake
+
+        return merge_ducklake(
+            self._metadata_path,
+            table,
+            source_df,
+            on,
+            schema=schema,
+            when_matched_update=when_matched_update,
+            when_not_matched_insert=when_not_matched_insert,
+            data_path=self._data_path_override,
+        )
+
+    def create_table(
+        self,
+        table: str,
+        schema_def: dict[str, pl.DataType],
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Create an empty table with the given schema."""
+        from ducklake_polars import create_ducklake_table
+
+        create_ducklake_table(
+            self._metadata_path,
+            table,
+            schema_def,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def drop_table(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Drop a table."""
+        from ducklake_polars import drop_ducklake_table
+
+        drop_ducklake_table(
+            self._metadata_path,
+            table,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def add_column(
+        self,
+        table: str,
+        column_name: str,
+        column_type: pl.DataType,
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Add a column to a table."""
+        from ducklake_polars import alter_ducklake_add_column
+
+        alter_ducklake_add_column(
+            self._metadata_path,
+            table,
+            column_name,
+            column_type,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def drop_column(
+        self,
+        table: str,
+        column_name: str,
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Drop a column from a table."""
+        from ducklake_polars import alter_ducklake_drop_column
+
+        alter_ducklake_drop_column(
+            self._metadata_path,
+            table,
+            column_name,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def rename_column(
+        self,
+        table: str,
+        old_name: str,
+        new_name: str,
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Rename a column."""
+        from ducklake_polars import alter_ducklake_rename_column
+
+        alter_ducklake_rename_column(
+            self._metadata_path,
+            table,
+            old_name,
+            new_name,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def set_partitioned_by(
+        self,
+        table: str,
+        columns: list[str],
+        *,
+        schema: str = "main",
+    ) -> None:
+        """Set partition columns."""
+        from ducklake_polars import alter_ducklake_set_partitioned_by
+
+        alter_ducklake_set_partitioned_by(
+            self._metadata_path,
+            table,
+            columns,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def set_sort_keys(
+        self,
+        table: str,
+        keys: list[tuple[str, str]],
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Set sort keys. keys = [(col, 'ASC'|'DESC'), ...]."""
+        from ducklake_polars import alter_ducklake_set_sort_keys
+
+        alter_ducklake_set_sort_keys(
+            self._metadata_path,
+            table,
+            keys,
+            schema=schema_name,
+            data_path=self._data_path_override,
+        )
+
+    def rewrite_data_files(
+        self,
+        table: str,
+        *,
+        schema: str = "main",
+    ) -> int:
+        """Compact data files. Returns new snapshot ID or -1 if no-op."""
+        from ducklake_polars import rewrite_data_files_ducklake
+
+        return rewrite_data_files_ducklake(
+            self._metadata_path,
+            table,
+            schema=schema,
+            data_path=self._data_path_override,
+        )
+
+    def expire_snapshots(
+        self,
+        *,
+        older_than: str | None = None,
+        retain_last: int | None = None,
+    ) -> int:
+        """Expire old snapshots. Returns number expired."""
+        from ducklake_polars import expire_snapshots
+
+        return expire_snapshots(
+            self._metadata_path,
+            older_than=older_than,
+            retain_last=retain_last,
+            data_path=self._data_path_override,
+        )
+
+    def vacuum(self) -> int:
+        """Remove orphaned data files. Returns count removed."""
+        from ducklake_polars import vacuum_ducklake
+
+        return vacuum_ducklake(
+            self._metadata_path,
+            data_path=self._data_path_override,
+        )
