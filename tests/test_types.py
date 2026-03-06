@@ -729,3 +729,131 @@ class TestVariantType:
 
         result = read_ducklake(cat.metadata_path, "test")
         assert result.shape == (3, 1)
+
+
+class TestUnionType:
+    """Test UNION type support — DuckDB writes as struct in Parquet."""
+
+    @pytest.mark.xfail(reason="DuckLake does not support UNION type yet (upstream)")
+    def test_union_basic(self, ducklake_catalog):
+        """Basic UNION type with string and integer members."""
+        cat = ducklake_catalog
+        cat.execute("""
+            CREATE TABLE ducklake.test (
+                id INTEGER,
+                u UNION(name VARCHAR, num INTEGER)
+            )
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (1, 'hello'::UNION(name VARCHAR, num INTEGER)),
+                (2, 42::UNION(name VARCHAR, num INTEGER))
+        """)
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert len(result) == 2
+        assert "u" in result.columns
+
+        # UNION is stored as a struct in Parquet
+        # Polars reads it as a Struct type
+        u_col = result["u"]
+        assert u_col.dtype == pl.Struct
+
+    @pytest.mark.xfail(reason="DuckLake does not support UNION type yet (upstream)")
+    def test_union_with_nulls(self, ducklake_catalog):
+        """UNION with NULL values."""
+        cat = ducklake_catalog
+        cat.execute("""
+            CREATE TABLE ducklake.test (
+                id INTEGER,
+                u UNION(name VARCHAR, num INTEGER)
+            )
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (1, 'hello'::UNION(name VARCHAR, num INTEGER)),
+                (2, NULL),
+                (3, 42::UNION(name VARCHAR, num INTEGER))
+        """)
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert len(result) == 3
+
+    @pytest.mark.xfail(reason="DuckLake does not support UNION type yet (upstream)")
+    def test_union_three_members(self, ducklake_catalog):
+        """UNION with three different type members."""
+        cat = ducklake_catalog
+        cat.execute("""
+            CREATE TABLE ducklake.test (
+                id INTEGER,
+                u UNION(s VARCHAR, i INTEGER, f DOUBLE)
+            )
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (1, 'text'::UNION(s VARCHAR, i INTEGER, f DOUBLE)),
+                (2, 42::UNION(s VARCHAR, i INTEGER, f DOUBLE)),
+                (3, 3.14::UNION(s VARCHAR, i INTEGER, f DOUBLE))
+        """)
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert len(result) == 3
+        u_col = result["u"]
+        assert u_col.dtype == pl.Struct
+
+    @pytest.mark.xfail(reason="DuckLake does not support UNION type yet (upstream)")
+    def test_union_read_members(self, ducklake_catalog):
+        """Can read individual UNION members from the struct."""
+        cat = ducklake_catalog
+        cat.execute("""
+            CREATE TABLE ducklake.test (
+                id INTEGER,
+                u UNION(name VARCHAR, num INTEGER)
+            )
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (1, 'hello'::UNION(name VARCHAR, num INTEGER)),
+                (2, 42::UNION(name VARCHAR, num INTEGER))
+        """)
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        # Access struct fields
+        u_struct = result["u"]
+        names = u_struct.struct.field("name")
+        nums = u_struct.struct.field("num")
+
+        # Row 1: name='hello', num=NULL
+        assert names[0] == "hello"
+        assert nums[0] is None
+
+        # Row 2: name=NULL, num=42
+        assert names[1] is None
+        assert nums[1] == 42
+
+    @pytest.mark.xfail(reason="DuckLake does not support UNION type yet (upstream)")
+    def test_union_time_travel(self, ducklake_catalog):
+        """UNION type works with time travel."""
+        cat = ducklake_catalog
+        cat.execute("""
+            CREATE TABLE ducklake.test (
+                id INTEGER,
+                u UNION(name VARCHAR, num INTEGER)
+            )
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (1, 'first'::UNION(name VARCHAR, num INTEGER))
+        """)
+        cat.execute("""
+            INSERT INTO ducklake.test VALUES
+                (2, 100::UNION(name VARCHAR, num INTEGER))
+        """)
+        cat.close()
+
+        result = read_ducklake(cat.metadata_path, "test")
+        assert len(result) == 2
