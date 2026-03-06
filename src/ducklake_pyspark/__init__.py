@@ -18,8 +18,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from pyspark.sql import DataFrame, SparkSession
+    from pyspark.sql.types import StructType
 
 from ducklake_core._catalog import DuckLakeCatalogReader
+from ducklake_core._writer import TransactionConflictError
 from ducklake_pyspark._ddl import (
     alter_ducklake_add_column,
     alter_ducklake_drop_column,
@@ -54,6 +56,14 @@ from ducklake_pyspark._ddl import (
 __all__ = [
     "read_ducklake",
     "read_ducklake_changes",
+    "TransactionConflictError",
+    "write_ducklake",
+    "create_ducklake_table",
+    "delete_ducklake",
+    "update_ducklake",
+    "merge_ducklake",
+    "create_table_as_ducklake",
+    "add_files_ducklake",
     "alter_ducklake_add_column",
     "alter_ducklake_drop_column",
     "alter_ducklake_rename_column",
@@ -236,54 +246,67 @@ def read_ducklake(
             file_groups[rename_key] = (rename_map, [])
         file_groups[rename_key][1].append(f)
 
+    # Target column order
+    target_cols = [col.column_name for col in all_columns]
+
+    def _apply_renames_and_fill(df_in, rename_map):
+        """Apply column renames, add missing columns, select in order."""
+        for old_name, new_name in rename_map.items():
+            if old_name in df_in.columns:
+                df_in = df_in.withColumnRenamed(old_name, new_name)
+        for col_info in all_columns:
+            if col_info.column_name not in df_in.columns:
+                spark_type = _duckdb_type_to_spark(col_info.column_type)
+                df_in = df_in.withColumn(col_info.column_name, F.lit(None).cast(spark_type))
+        return df_in.select(*[c for c in target_cols if c in df_in.columns])
+
     # Read each group of files
     result_df = None
 
     for rename_key, (rename_map, group_files) in file_groups.items():
-        file_paths = [resolved_paths[f.data_file_id] for f in group_files]
+        # Split files: those with position-deletes must be read individually
+        files_no_deletes = [f for f in group_files if f.data_file_id not in deletes_by_file]
+        files_with_deletes = [f for f in group_files if f.data_file_id in deletes_by_file]
 
-        # Read Parquet files through Spark
-        group_df = spark.read.parquet(*file_paths)
+        # Batch-read files without deletes (faster)
+        if files_no_deletes:
+            paths = [resolved_paths[f.data_file_id] for f in files_no_deletes]
+            batch_df = _apply_renames_and_fill(spark.read.parquet(*paths), rename_map)
+            if result_df is None:
+                result_df = batch_df
+            else:
+                result_df = result_df.unionByName(batch_df, allowMissingColumns=True)
 
-        # Apply column renames (schema evolution)
-        for old_name, new_name in rename_map.items():
-            if old_name in group_df.columns:
-                group_df = group_df.withColumnRenamed(old_name, new_name)
+        # Read files with deletes individually so row positions are correct
+        for f in files_with_deletes:
+            file_path = resolved_paths[f.data_file_id]
+            file_df = spark.read.parquet(file_path)
 
-        # Apply delete files: anti-join on row position
-        for f in group_files:
-            if f.data_file_id in deletes_by_file:
-                for del_path in deletes_by_file[f.data_file_id]:
-                    # DuckLake delete files are Parquet with a row_id column
-                    delete_df = spark.read.parquet(del_path)
-                    if "row_id" in delete_df.columns:
-                        # Add monotonically increasing row index for position-based delete
-                        group_df = group_df.withColumn(
-                            "__ducklake_row_id__",
-                            F.monotonically_increasing_id()
-                        )
-                        delete_ids = delete_df.select(
-                            F.col("row_id").alias("__ducklake_row_id__")
-                        )
-                        group_df = group_df.join(
-                            delete_ids, "__ducklake_row_id__", "left_anti"
-                        ).drop("__ducklake_row_id__")
+            # Assign deterministic 0-based row positions within the file
+            from pyspark.sql.window import Window
+            file_df = file_df.withColumn(
+                "__ducklake_pos__",
+                F.row_number().over(
+                    Window.orderBy(F.monotonically_increasing_id())
+                ) - 1,
+            )
 
-        # Ensure all expected columns exist (added columns default to null)
-        for col_info in all_columns:
-            if col_info.column_name not in group_df.columns:
-                spark_type = _duckdb_type_to_spark(col_info.column_type)
-                group_df = group_df.withColumn(col_info.column_name, F.lit(None).cast(spark_type))
+            # Apply position-based delete files
+            for del_path in deletes_by_file[f.data_file_id]:
+                del_df = spark.read.parquet(del_path)
+                if "pos" in del_df.columns:
+                    del_positions = del_df.select(
+                        F.col("pos").cast("long").alias("__ducklake_pos__")
+                    )
+                    file_df = file_df.join(del_positions, "__ducklake_pos__", "left_anti")
 
-        # Select columns in the correct order
-        target_cols = [col.column_name for col in all_columns]
-        group_df = group_df.select(*[c for c in target_cols if c in group_df.columns])
+            file_df = file_df.drop("__ducklake_pos__")
+            file_df = _apply_renames_and_fill(file_df, rename_map)
 
-        # Union groups
-        if result_df is None:
-            result_df = group_df
-        else:
-            result_df = result_df.unionByName(group_df, allowMissingColumns=True)
+            if result_df is None:
+                result_df = file_df
+            else:
+                result_df = result_df.unionByName(file_df, allowMissingColumns=True)
 
     if result_df is None:
         return spark.createDataFrame([], spark_schema)
@@ -395,6 +418,492 @@ def read_ducklake_changes(
         return spark.createDataFrame([], spark_schema)
 
     return result_df
+
+
+
+
+# ------------------------------------------------------------------
+# Write operations
+# ------------------------------------------------------------------
+
+
+def _merge_schema(writer, arrow_schema, table: str, schema: str, snap_id: int) -> None:
+    """Auto-merge Arrow schema into existing table schema.
+
+    Adds columns present in *arrow_schema* but missing in the table.
+    Columns present in the table but missing in the schema are left as-is
+    (NULL on write).
+    """
+    table_id = writer._table_exists(table, schema, snap_id)
+    if table_id is None:
+        return
+    existing_cols = writer._get_columns_for_table(table_id, snap_id)
+    existing_names = {col[1] for col in existing_cols}
+    for field in arrow_schema:
+        if field.name not in existing_names:
+            writer.add_column(table, field.name, field.type, schema_name=schema)
+
+
+def write_ducklake(
+    df: DataFrame,
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    mode: str = "error",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
+    max_retries: int = 3,
+    retry_wait_ms: float = 100,
+    retry_backoff: float = 2.0,
+    schema_evolution: str = "strict",
+) -> None:
+    """
+    Write a PySpark DataFrame to a DuckLake table.
+
+    Parameters
+    ----------
+    df
+        PySpark DataFrame to write.
+    path
+        Path to the DuckLake metadata catalog file (.ducklake or .db).
+        Supports SQLite and PostgreSQL backends.
+    table
+        Name of the table to write to.
+    schema
+        Schema name (default: ``"main"``).
+    mode
+        Write mode:
+
+        - ``"error"`` (default): fail if the table already exists.
+        - ``"append"``: append data; creates the table if absent.
+        - ``"overwrite"``: replace all data; creates the table if absent.
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of rows to store inline in the metadata catalog
+        instead of writing Parquet files. Set to 0 (default) to disable.
+    schema_evolution
+        How to handle schema mismatches on append:
+
+        - ``"strict"`` (default): fail if schemas differ.
+        - ``"merge"``: auto-add new columns (existing rows get NULL).
+
+    Raises
+    ------
+    ValueError
+        If *mode* is ``"error"`` and the table already exists, or if
+        *mode* is not recognized.
+    """
+    if mode not in ("error", "append", "overwrite"):
+        msg = f"Invalid write mode '{mode}'. Must be 'error', 'append', or 'overwrite'."
+        raise ValueError(msg)
+
+    from ducklake_pyspark._writer import (
+        DuckLakeCatalogWriter,
+        _pyspark_df_to_arrow,
+    )
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    # Convert PySpark DataFrame -> Arrow once to avoid double Spark collection
+    arrow_df = _pyspark_df_to_arrow(df)
+    arrow_schema = {field.name: field.type for field in arrow_df.schema}
+    is_empty = len(arrow_df) == 0
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
+        max_retries=max_retries,
+        retry_wait_ms=retry_wait_ms,
+        retry_backoff=retry_backoff,
+    ) as writer:
+        snapshot_info = writer._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id = -1
+        else:
+            snap_id, _sv, _nci, _nfi = snapshot_info
+        table_id = writer._table_exists(table, schema, snap_id)
+
+        if mode == "error":
+            if table_id is not None:
+                msg = f"Table '{schema}.{table}' already exists (mode='error')"
+                raise ValueError(msg)
+            writer.create_table(table, arrow_schema, schema_name=schema)
+            if not is_empty:
+                writer.insert_data(arrow_df, table, schema_name=schema)
+
+        elif mode == "append":
+            if table_id is None:
+                writer.create_table(table, arrow_schema, schema_name=schema)
+            elif schema_evolution == "merge":
+                _merge_schema(writer, arrow_df.schema, table, schema, snap_id)
+            if not is_empty:
+                writer.insert_data(arrow_df, table, schema_name=schema)
+
+        elif mode == "overwrite":
+            if table_id is None:
+                writer.create_table(table, arrow_schema, schema_name=schema)
+                if not is_empty:
+                    writer.insert_data(arrow_df, table, schema_name=schema)
+            else:
+                writer.overwrite_data(arrow_df, table, schema_name=schema)
+
+
+def create_ducklake_table(
+    path: str | Path,
+    table: str,
+    spark_schema: StructType,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Create a new empty table in a DuckLake catalog.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the table to create.
+    spark_schema
+        Schema for the new table, as a PySpark ``StructType``.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table already exists.
+    """
+    from ducklake_pyspark._writer import (
+        DuckLakeCatalogWriter,
+        _pyspark_schema_to_arrow_dict,
+    )
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+    arrow_schema = _pyspark_schema_to_arrow_dict(spark_schema)
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        writer.create_table(table, arrow_schema, schema_name=schema)
+
+
+def delete_ducklake(
+    path: str | Path,
+    table: str,
+    predicate_sql: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int:
+    """
+    Delete rows matching a SQL predicate from a DuckLake table.
+
+    Creates position-delete files for each affected Parquet data file.
+    If no rows match the predicate, no snapshot is created.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the table to delete from.
+    predicate_sql
+        A SQL expression that evaluates to a boolean. Rows where the
+        expression is ``True`` will be deleted.
+        Example: ``"id > 10"`` or ``"region = 'EU' AND score < 50"``.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of inlined rows.
+
+    Returns
+    -------
+    int
+        The number of rows deleted.
+    """
+    from ducklake_pyspark._writer import DuckLakeCatalogWriter, _sql_predicate_to_arrow
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.delete_data(
+            _sql_predicate_to_arrow(predicate_sql), table, schema_name=schema
+        )
+
+
+def update_ducklake(
+    path: str | Path,
+    table: str,
+    updates: dict[str, object],
+    predicate_sql: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int:
+    """
+    Update rows matching a SQL predicate in a DuckLake table.
+
+    Atomically deletes old rows and inserts new rows with updated
+    values in a single snapshot.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the table to update.
+    updates
+        Dictionary mapping column names to new literal values.
+    predicate_sql
+        A SQL expression that evaluates to a boolean. Rows where the
+        expression is ``True`` will be updated.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of inlined rows.
+
+    Returns
+    -------
+    int
+        The number of rows updated.
+    """
+    from ducklake_pyspark._writer import DuckLakeCatalogWriter, _sql_predicate_to_arrow
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.update_data(
+            updates,
+            _sql_predicate_to_arrow(predicate_sql),
+            table,
+            schema_name=schema,
+        )
+
+
+def merge_ducklake(
+    path: str | Path,
+    table: str,
+    source_df: DataFrame,
+    on: str | list[str],
+    *,
+    when_matched_update: dict[str, object] | bool | None = None,
+    when_not_matched_insert: bool = True,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> tuple[int, int]:
+    """
+    Merge a source PySpark DataFrame into an existing DuckLake table.
+
+    Matches rows on the *on* key columns, optionally updates matched
+    target rows, and optionally inserts unmatched source rows.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the target table.
+    source_df
+        Source PySpark DataFrame to merge from.
+    on
+        Column name(s) to match on. Single string or list.
+    when_matched_update
+        - ``None``: matched target rows are left untouched.
+        - ``True``: replace matched target rows with source rows.
+        - ``dict``: update matched rows with these literal values.
+    when_not_matched_insert
+        If ``True`` (default), insert unmatched source rows.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum number of inlined rows.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(rows_updated, rows_inserted)``.
+    """
+    from ducklake_pyspark._writer import DuckLakeCatalogWriter, _pyspark_df_to_arrow
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    arrow_source = _pyspark_df_to_arrow(source_df)
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.merge_data(
+            arrow_source,
+            table,
+            on,
+            when_matched_update=when_matched_update,
+            when_not_matched_insert=when_not_matched_insert,
+            schema_name=schema,
+        )
+
+
+def create_table_as_ducklake(
+    df: DataFrame,
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    data_inlining_row_limit: int = 0,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None:
+    """
+    Create a new table and insert data in a single snapshot (CTAS).
+
+    The table schema is inferred from the PySpark DataFrame.
+
+    Parameters
+    ----------
+    df
+        PySpark DataFrame whose schema defines the new table.
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the table to create.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+    data_inlining_row_limit
+        Maximum rows to store inline in the metadata catalog.
+
+    Raises
+    ------
+    ValueError
+        If the table already exists.
+    """
+    from ducklake_pyspark._writer import DuckLakeCatalogWriter, _pyspark_df_to_arrow
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    arrow_df = _pyspark_df_to_arrow(df)
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        data_inlining_row_limit=data_inlining_row_limit,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        writer.create_table_with_data(table, arrow_df, schema_name=schema)
+
+
+def add_files_ducklake(
+    path: str | Path,
+    table: str,
+    file_paths: list[str],
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+    max_retries: int = 3,
+    retry_wait_ms: float = 100,
+    retry_backoff: float = 2.0,
+) -> int:
+    """
+    Register existing Parquet files into a DuckLake table.
+
+    Files are referenced in-place (not copied). Schema validation is
+    performed against the table's column definitions.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the target table.
+    file_paths
+        List of paths to Parquet files.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+
+    Returns
+    -------
+    int
+        The new snapshot ID.
+
+    Raises
+    ------
+    ValueError
+        If the table does not exist or schemas do not match.
+    """
+    from ducklake_pyspark._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+        max_retries=max_retries,
+        retry_wait_ms=retry_wait_ms,
+        retry_backoff=retry_backoff,
+    ) as writer:
+        return writer.add_files(table, file_paths, schema_name=schema)
 
 
 # ---------------------------------------------------------------

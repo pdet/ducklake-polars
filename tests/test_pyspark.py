@@ -7,12 +7,22 @@ import tempfile
 import shutil
 
 import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 # Skip all tests if PySpark is not available
 pyspark = pytest.importorskip("pyspark")
 
 from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    DoubleType,
+    IntegerType,
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+)
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +105,34 @@ def ducklake_multi_snapshot():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+@pytest.fixture
+def empty_ducklake():
+    """Create an initialized but empty DuckLake catalog."""
+    tmpdir = tempfile.mkdtemp(prefix="ducklake_pyspark_empty_")
+    meta = os.path.join(tmpdir, "test.ducklake")
+    data = os.path.join(tmpdir, "data")
+    os.makedirs(data)
+
+    con = duckdb.connect()
+    con.install_extension("ducklake")
+    con.load_extension("ducklake")
+    con.execute(
+        f"ATTACH 'ducklake:sqlite:{meta}' AS lake "
+        f"(DATA_PATH '{data}', DATA_INLINING_ROW_LIMIT 0)"
+    )
+    con.execute("DETACH lake")
+    con.close()
+
+    yield meta, data, tmpdir
+
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ------------------------------------------------------------------
+# Read tests (existing)
+# ------------------------------------------------------------------
+
+
 class TestReadDuckLake:
     """Basic read tests."""
 
@@ -139,7 +177,6 @@ class TestReadDuckLake:
 
     def test_read_types(self, spark, ducklake_catalog):
         from ducklake_pyspark import read_ducklake
-        from pyspark.sql.types import LongType, StringType, DoubleType
 
         meta, _, _ = ducklake_catalog
         df = read_ducklake(spark, meta, "users")
@@ -213,3 +250,376 @@ class TestTimeTravelPySpark:
                 snapshot_version=1,
                 snapshot_time=datetime.now(),
             )
+
+
+# ------------------------------------------------------------------
+# Write tests
+# ------------------------------------------------------------------
+
+
+class TestWriteDuckLake:
+    """Write operation tests."""
+
+    def test_write_basic(self, spark, empty_ducklake):
+        """Write a PySpark DataFrame, then read it back."""
+        from ducklake_pyspark import write_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0), (3, "charlie", 30.0)],
+            ["id", "name", "score"],
+        )
+
+        write_ducklake(df, meta, "test_table")
+
+        result = read_ducklake(spark, meta, "test_table")
+        assert result.count() == 3
+        assert set(result.columns) == {"id", "name", "score"}
+
+        rows = {r["id"]: r for r in result.collect()}
+        assert rows[1]["name"] == "alice"
+        assert rows[2]["name"] == "bob"
+        assert abs(rows[3]["score"] - 30.0) < 0.01
+
+    def test_write_error_mode_existing_table(self, spark, ducklake_catalog):
+        """mode='error' should fail when the table already exists."""
+        from ducklake_pyspark import write_ducklake
+
+        meta, _, _ = ducklake_catalog
+        df = spark.createDataFrame([(1, "x")], ["id", "name"])
+
+        with pytest.raises(ValueError, match="already exists"):
+            write_ducklake(df, meta, "users", mode="error")
+
+    def test_write_append(self, spark, empty_ducklake):
+        """Write then append more data."""
+        from ducklake_pyspark import write_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df1 = spark.createDataFrame([(1, "alice"), (2, "bob")], ["id", "name"])
+        df2 = spark.createDataFrame([(3, "charlie"), (4, "dave")], ["id", "name"])
+
+        write_ducklake(df1, meta, "append_test", mode="append")
+        write_ducklake(df2, meta, "append_test", mode="append")
+
+        result = read_ducklake(spark, meta, "append_test")
+        assert result.count() == 4
+
+    def test_write_overwrite(self, spark, empty_ducklake):
+        """Overwrite replaces all data."""
+        from ducklake_pyspark import write_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df1 = spark.createDataFrame([(1, "alice"), (2, "bob")], ["id", "name"])
+        df2 = spark.createDataFrame([(3, "charlie")], ["id", "name"])
+
+        write_ducklake(df1, meta, "overwrite_test", mode="append")
+        assert read_ducklake(spark, meta, "overwrite_test").count() == 2
+
+        write_ducklake(df2, meta, "overwrite_test", mode="overwrite")
+        result = read_ducklake(spark, meta, "overwrite_test")
+        assert result.count() == 1
+        assert result.collect()[0]["name"] == "charlie"
+
+
+class TestCreateTable:
+    """create_ducklake_table and create_table_as_ducklake tests."""
+
+    def test_create_empty_table(self, spark, empty_ducklake):
+        """Create an empty table with a PySpark schema."""
+        from ducklake_pyspark import create_ducklake_table, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        schema = StructType([
+            StructField("id", LongType(), True),
+            StructField("name", StringType(), True),
+            StructField("score", DoubleType(), True),
+        ])
+
+        create_ducklake_table(meta, "empty_table", schema)
+
+        result = read_ducklake(spark, meta, "empty_table")
+        assert result.count() == 0
+        assert set(result.columns) == {"id", "name", "score"}
+
+    def test_create_table_as(self, spark, empty_ducklake):
+        """CTAS: create table with data in one snapshot."""
+        from ducklake_pyspark import create_table_as_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0)],
+            ["id", "name", "score"],
+        )
+
+        create_table_as_ducklake(df, meta, "ctas_table")
+
+        result = read_ducklake(spark, meta, "ctas_table")
+        assert result.count() == 2
+        assert set(result.columns) == {"id", "name", "score"}
+
+
+class TestDeleteDuckLake:
+    """delete_ducklake tests."""
+
+    def test_delete_basic(self, spark, empty_ducklake):
+        """Delete rows matching a SQL predicate."""
+        from ducklake_pyspark import write_ducklake, delete_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(i, f"user_{i}", float(i * 10)) for i in range(10)],
+            ["id", "name", "score"],
+        )
+        write_ducklake(df, meta, "del_test")
+
+        deleted = delete_ducklake(meta, "del_test", "id >= 5")
+        assert deleted == 5
+
+        result = read_ducklake(spark, meta, "del_test")
+        assert result.count() == 5
+        ids = sorted([r["id"] for r in result.collect()])
+        assert ids == [0, 1, 2, 3, 4]
+
+    def test_delete_no_match(self, spark, empty_ducklake):
+        """Delete with no matching rows returns 0."""
+        from ducklake_pyspark import write_ducklake, delete_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame([(1, "a"), (2, "b")], ["id", "name"])
+        write_ducklake(df, meta, "del_nomatch")
+
+        deleted = delete_ducklake(meta, "del_nomatch", "id > 100")
+        assert deleted == 0
+        assert read_ducklake(spark, meta, "del_nomatch").count() == 2
+
+
+class TestUpdateDuckLake:
+    """update_ducklake tests."""
+
+    def test_update_basic(self, spark, empty_ducklake):
+        """Update rows matching a SQL predicate."""
+        from ducklake_pyspark import write_ducklake, update_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0), (3, "charlie", 30.0)],
+            ["id", "name", "score"],
+        )
+        write_ducklake(df, meta, "upd_test")
+
+        updated = update_ducklake(
+            meta, "upd_test",
+            {"score": 99.0},
+            "id <= 2",
+        )
+        assert updated == 2
+
+        result = read_ducklake(spark, meta, "upd_test")
+        assert result.count() == 3
+
+        rows = {r["id"]: r for r in result.collect()}
+        assert abs(rows[1]["score"] - 99.0) < 0.01
+        assert abs(rows[2]["score"] - 99.0) < 0.01
+        assert abs(rows[3]["score"] - 30.0) < 0.01
+
+    def test_update_no_match(self, spark, empty_ducklake):
+        """Update with no matching rows returns 0."""
+        from ducklake_pyspark import write_ducklake, update_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame([(1, "alice")], ["id", "name"])
+        write_ducklake(df, meta, "upd_nomatch")
+
+        updated = update_ducklake(
+            meta, "upd_nomatch", {"name": "unknown"}, "id > 100"
+        )
+        assert updated == 0
+
+
+class TestMergeDuckLake:
+    """merge_ducklake tests."""
+
+    def test_merge_insert_only(self, spark, empty_ducklake):
+        """Merge with only inserts (no matched rows)."""
+        from ducklake_pyspark import write_ducklake, merge_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        target = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0)],
+            ["id", "name", "score"],
+        )
+        write_ducklake(target, meta, "merge_test")
+
+        source = spark.createDataFrame(
+            [(3, "charlie", 30.0), (4, "dave", 40.0)],
+            ["id", "name", "score"],
+        )
+
+        updated, inserted = merge_ducklake(
+            meta, "merge_test", source, "id",
+            when_matched_update=True,
+            when_not_matched_insert=True,
+        )
+        assert updated == 0
+        assert inserted == 2
+
+        result = read_ducklake(spark, meta, "merge_test")
+        assert result.count() == 4
+
+    def test_merge_update_and_insert(self, spark, empty_ducklake):
+        """Merge that both updates existing and inserts new rows."""
+        from ducklake_pyspark import write_ducklake, merge_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        target = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0)],
+            ["id", "name", "score"],
+        )
+        write_ducklake(target, meta, "merge_upsert")
+
+        source = spark.createDataFrame(
+            [(2, "bob_updated", 25.0), (3, "charlie", 30.0)],
+            ["id", "name", "score"],
+        )
+
+        updated, inserted = merge_ducklake(
+            meta, "merge_upsert", source, "id",
+            when_matched_update=True,
+            when_not_matched_insert=True,
+        )
+        assert updated == 1
+        assert inserted == 1
+
+        result = read_ducklake(spark, meta, "merge_upsert")
+        assert result.count() == 3
+
+        rows = {r["id"]: r for r in result.collect()}
+        assert rows[1]["name"] == "alice"
+        assert rows[2]["name"] == "bob_updated"
+        assert abs(rows[2]["score"] - 25.0) < 0.01
+        assert rows[3]["name"] == "charlie"
+
+    def test_merge_update_dict(self, spark, empty_ducklake):
+        """Merge with dict-based update for matched rows."""
+        from ducklake_pyspark import write_ducklake, merge_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        target = spark.createDataFrame(
+            [(1, "alice", 10.0), (2, "bob", 20.0)],
+            ["id", "name", "score"],
+        )
+        write_ducklake(target, meta, "merge_dict")
+
+        source = spark.createDataFrame(
+            [(1, "alice_new", 999.0), (2, "bob_new", 999.0)],
+            ["id", "name", "score"],
+        )
+
+        updated, inserted = merge_ducklake(
+            meta, "merge_dict", source, "id",
+            when_matched_update={"score": 77.0},
+            when_not_matched_insert=False,
+        )
+        assert updated == 2
+        assert inserted == 0
+
+        result = read_ducklake(spark, meta, "merge_dict")
+        assert result.count() == 2
+
+        rows = {r["id"]: r for r in result.collect()}
+        # Names should stay, score should be updated
+        assert rows[1]["name"] == "alice"
+        assert abs(rows[1]["score"] - 77.0) < 0.01
+        assert rows[2]["name"] == "bob"
+        assert abs(rows[2]["score"] - 77.0) < 0.01
+
+
+class TestAddFilesDuckLake:
+    """add_files_ducklake tests."""
+
+    def test_add_parquet_files(self, spark, empty_ducklake):
+        """Register external Parquet files into a DuckLake table."""
+        from ducklake_pyspark import (
+            create_ducklake_table,
+            add_files_ducklake,
+            read_ducklake,
+        )
+
+        meta, data_dir, tmpdir = empty_ducklake
+
+        # Create a Parquet file externally
+        table = pa.table({"id": [1, 2, 3], "value": [10.0, 20.0, 30.0]})
+        parquet_dir = os.path.join(data_dir, "main", "ext_table")
+        os.makedirs(parquet_dir, exist_ok=True)
+        parquet_path = os.path.join(parquet_dir, "data.parquet")
+        pq.write_table(table, parquet_path)
+
+        # Create the table schema
+        schema = StructType([
+            StructField("id", LongType(), True),
+            StructField("value", DoubleType(), True),
+        ])
+        create_ducklake_table(meta, "ext_table", schema)
+
+        # Register the Parquet file
+        add_files_ducklake(meta, "ext_table", [parquet_path])
+
+        result = read_ducklake(spark, meta, "ext_table")
+        assert result.count() == 3
+
+
+class TestWriteReadRoundtrip:
+    """End-to-end roundtrip tests: write with PySpark, read with PySpark."""
+
+    def test_write_read_roundtrip(self, spark, empty_ducklake):
+        """Full roundtrip: write → read → verify values."""
+        from ducklake_pyspark import write_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+
+        data = [(i, f"user_{i}", "US" if i % 2 == 0 else "EU", float(i * 10))
+                for i in range(50)]
+        df = spark.createDataFrame(data, ["id", "name", "region", "score"])
+
+        write_ducklake(df, meta, "roundtrip")
+
+        result = read_ducklake(spark, meta, "roundtrip")
+        assert result.count() == 50
+        assert set(result.columns) == {"id", "name", "region", "score"}
+
+        # Verify aggregation
+        us_count = result.filter(result.region == "US").count()
+        assert us_count == 25
+
+    def test_write_delete_read(self, spark, empty_ducklake):
+        """Write → delete → read roundtrip."""
+        from ducklake_pyspark import write_ducklake, delete_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(i, f"u{i}") for i in range(20)], ["id", "name"]
+        )
+        write_ducklake(df, meta, "wd_test")
+
+        delete_ducklake(meta, "wd_test", "id >= 10")
+
+        result = read_ducklake(spark, meta, "wd_test")
+        assert result.count() == 10
+
+    def test_write_update_read(self, spark, empty_ducklake):
+        """Write → update → read roundtrip."""
+        from ducklake_pyspark import write_ducklake, update_ducklake, read_ducklake
+
+        meta, _, _ = empty_ducklake
+        df = spark.createDataFrame(
+            [(1, "old_name"), (2, "keep_me")], ["id", "name"]
+        )
+        write_ducklake(df, meta, "wu_test")
+
+        update_ducklake(meta, "wu_test", {"name": "new_name"}, "id = 1")
+
+        result = read_ducklake(spark, meta, "wu_test")
+        rows = {r["id"]: r for r in result.collect()}
+        assert rows[1]["name"] == "new_name"
+        assert rows[2]["name"] == "keep_me"
