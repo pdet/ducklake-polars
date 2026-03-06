@@ -48,6 +48,7 @@ __all__ = [
     "expire_snapshots",
     "vacuum_ducklake",
     "rewrite_data_files_ducklake",
+    "DuckLakeStreamWriter",
     "create_ducklake_view",
     "drop_ducklake_view",
     "set_ducklake_table_tag",
@@ -185,6 +186,19 @@ def read_ducklake(
     return lf.collect()
 
 
+def _merge_schema(writer, df, table: str, schema: str, snap_id: int) -> None:
+    """Auto-merge DataFrame schema into existing table schema."""
+    import polars as pl
+    table_id = writer._table_exists(table, schema, snap_id)
+    if table_id is None:
+        return
+    existing_cols = writer._get_columns_for_table(table_id, snap_id)
+    existing_names = {col[1] for col in existing_cols}
+    for col_name, col_type in df.schema.items():
+        if col_name not in existing_names:
+            writer.add_column(table, col_name, col_type, schema_name=schema)
+
+
 def write_ducklake(
     df: pl.DataFrame,
     path: str | Path,
@@ -199,6 +213,7 @@ def write_ducklake(
     max_retries: int = 3,
     retry_wait_ms: float = 100,
     retry_backoff: float = 2.0,
+    schema_evolution: str = "strict",
 ) -> None:
     """
     Write a Polars DataFrame to a DuckLake table.
@@ -272,6 +287,8 @@ def write_ducklake(
         elif mode == "append":
             if table_id is None:
                 writer.create_table(table, dict(df.schema), schema_name=schema)
+            elif schema_evolution == "merge":
+                _merge_schema(writer, df, table, schema, snap_id)
             if not df.is_empty():
                 writer.insert_data(df, table, schema_name=schema)
 
@@ -1622,3 +1639,131 @@ def table_info(
     dp = os.fspath(data_path) if data_path is not None else None
     with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
         return reader.table_info(table, schema)
+
+
+# ------------------------------------------------------------------
+# Streaming Writer
+# ------------------------------------------------------------------
+
+class DuckLakeStreamWriter:
+    """
+    Buffered streaming writer for micro-batch ingestion.
+
+    Accumulates rows in an internal buffer and flushes to DuckLake
+    when the buffer exceeds ``flush_threshold`` rows. Auto-compacts
+    on close if ``compact_on_close`` is True.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Table name.
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+    flush_threshold
+        Number of rows before auto-flush (default: 10000).
+    compact_on_close
+        Whether to run rewrite_data_files on close (default: True).
+    schema_evolution
+        Schema evolution mode: "strict" or "merge" (default: "strict").
+
+    Examples
+    --------
+    >>> with DuckLakeStreamWriter("catalog.ducklake", "events") as writer:
+    ...     for batch in kafka_consumer:
+    ...         writer.append(batch)  # auto-flushes at threshold
+    ...     # auto-compacts on close
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        table: str,
+        *,
+        schema: str = "main",
+        data_path: str | Path | None = None,
+        flush_threshold: int = 10_000,
+        compact_on_close: bool = True,
+        schema_evolution: str = "strict",
+    ) -> None:
+        import polars as pl
+
+        self._path = os.fspath(path)
+        self._table = table
+        self._schema = schema
+        self._data_path = os.fspath(data_path) if data_path is not None else None
+        self._flush_threshold = flush_threshold
+        self._compact_on_close = compact_on_close
+        self._schema_evolution = schema_evolution
+        self._buffer: list[pl.DataFrame] = []
+        self._buffer_rows = 0
+        self._total_rows = 0
+        self._flush_count = 0
+
+    def __enter__(self) -> DuckLakeStreamWriter:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def append(self, df: pl.DataFrame) -> None:
+        """Append a DataFrame to the buffer. Auto-flushes when threshold is reached."""
+        import polars as pl
+
+        if df.is_empty():
+            return
+        self._buffer.append(df)
+        self._buffer_rows += len(df)
+        if self._buffer_rows >= self._flush_threshold:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write buffered data to DuckLake."""
+        import polars as pl
+
+        if not self._buffer:
+            return
+
+        combined = pl.concat(self._buffer) if len(self._buffer) > 1 else self._buffer[0]
+        write_ducklake(
+            combined,
+            self._path,
+            self._table,
+            schema=self._schema,
+            mode="append",
+            data_path=self._data_path,
+            schema_evolution=self._schema_evolution,
+        )
+        self._total_rows += len(combined)
+        self._flush_count += 1
+        self._buffer.clear()
+        self._buffer_rows = 0
+
+    def close(self) -> None:
+        """Flush remaining buffer and optionally compact."""
+        self.flush()
+        if self._compact_on_close and self._flush_count > 1:
+            rewrite_data_files_ducklake(
+                self._path,
+                self._table,
+                schema=self._schema,
+                data_path=self._data_path,
+            )
+
+    @property
+    def total_rows(self) -> int:
+        """Total rows written (flushed + buffered)."""
+        return self._total_rows + self._buffer_rows
+
+    @property
+    def flush_count(self) -> int:
+        """Number of flushes performed."""
+        return self._flush_count
+
+    @property
+    def buffer_rows(self) -> int:
+        """Current number of buffered rows."""
+        return self._buffer_rows
