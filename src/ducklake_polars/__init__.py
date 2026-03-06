@@ -48,6 +48,8 @@ __all__ = [
     "expire_snapshots",
     "vacuum_ducklake",
     "rewrite_data_files_ducklake",
+    "scan_ducklake_changes",
+    "read_ducklake_changes",
     "create_ducklake_view",
     "drop_ducklake_view",
     "set_ducklake_table_tag",
@@ -1622,3 +1624,79 @@ def table_info(
     dp = os.fspath(data_path) if data_path is not None else None
     with DuckLakeCatalogReader(os.fspath(path), data_path_override=dp) as reader:
         return reader.table_info(table, schema)
+
+
+# ------------------------------------------------------------------
+# Change Data Feed
+# ------------------------------------------------------------------
+
+def scan_ducklake_changes(
+    path: str | Path,
+    table: str,
+    start_version: int,
+    end_version: int,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> pl.LazyFrame:
+    """
+    Scan change data feed between two snapshots as a LazyFrame.
+
+    Returns a LazyFrame with columns:
+    - ``snapshot_id`` (Int64)
+    - ``change_type`` (String) — ``'insert'``, ``'delete'``,
+      ``'update_preimage'``, ``'update_postimage'``
+    - All table columns
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Table name.
+    start_version
+        Start snapshot (exclusive). Use 0 for all changes from the beginning.
+    end_version
+        End snapshot (inclusive).
+    schema
+        Schema name (default: "main").
+    data_path
+        Override the data path stored in the catalog.
+
+    Examples
+    --------
+    >>> changes = scan_ducklake_changes("catalog.ducklake", "users", 0, 5)
+    >>> inserts = changes.filter(pl.col("change_type") == "insert").collect()
+    >>> updates = changes.filter(
+    ...     pl.col("change_type") == "update_postimage"
+    ... ).collect()
+    """
+    import polars as pl
+    from ducklake_core._catalog_api import DuckLakeCatalog as _CoreCatalog
+
+    dp = os.fspath(data_path) if data_path is not None else None
+    cat = _CoreCatalog(path, data_path=dp)
+    arrow_table = cat.table_changes(table, start_version, end_version, schema=schema)
+    return pl.from_arrow(arrow_table).lazy()
+
+
+def read_ducklake_changes(
+    path: str | Path,
+    table: str,
+    start_version: int,
+    end_version: int,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> pl.DataFrame:
+    """
+    Read change data feed between two snapshots as a DataFrame.
+
+    Convenience function — calls ``scan_ducklake_changes(...).collect()``.
+
+    See :func:`scan_ducklake_changes` for parameters and return schema.
+    """
+    return scan_ducklake_changes(
+        path, table, start_version, end_version,
+        schema=schema, data_path=data_path,
+    ).collect()
