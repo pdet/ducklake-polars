@@ -63,6 +63,36 @@ def _decode_dictionary_columns(table: pa.Table) -> pa.Table:
     return table
 
 
+def _stamp_field_ids(
+    table: "pa.Table",
+    columns: list[tuple[int, str, str, "int | None"]],
+) -> "pa.Table":
+    """Set ``PARQUET:field_id`` metadata on each column in the Arrow table.
+
+    *columns* is ``[(column_id, column_name, column_type, parent_column)]``
+    (top-level only).  For every column in the table whose name matches a
+    catalog column, the corresponding ``column_id`` is stored as
+    ``PARQUET:field_id`` in the Arrow field metadata so that Parquet
+    readers (DuckDB, ducklake-polars) can identify columns by stable ID
+    rather than by name or position.
+    """
+    col_name_to_id: dict[str, int] = {name: col_id for col_id, name, _, _ in columns}
+    new_fields: list["pa.Field"] = []
+    for field in table.schema:
+        if field.name in col_name_to_id:
+            fid = col_name_to_id[field.name]
+            metadata = dict(field.metadata or {})
+            metadata[b"PARQUET:field_id"] = str(fid).encode()
+            new_fields.append(field.with_metadata(metadata))
+        else:
+            new_fields.append(field)
+    new_schema = pa.schema(new_fields, metadata=table.schema.metadata)
+    return pa.table(
+        [table.column(i) for i in range(len(table.schema))],
+        schema=new_schema,
+    )
+
+
 def _read_parquet_footer_size(path: str) -> int:
     """Read the Parquet footer size from a file."""
     try:
@@ -1340,7 +1370,7 @@ class DuckLakeCatalogWriter:
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
                 file_path = storage.join_path(base, file_name)
-                storage.write_parquet(df, file_path)
+                storage.write_parquet(_stamp_field_ids(df, top_level_cols), file_path)
 
                 file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
@@ -1756,7 +1786,7 @@ class DuckLakeCatalogWriter:
 
         file_name = f"ducklake-{_uuid7()}.parquet"
         file_path = storage.join_path(base, file_name)
-        storage.write_parquet(df, file_path)
+        storage.write_parquet(_stamp_field_ids(df, columns), file_path)
 
         file_size = storage.get_file_size(file_path)
         footer_size = _read_parquet_footer_size(file_path)
@@ -1882,7 +1912,7 @@ class DuckLakeCatalogWriter:
 
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = storage.join_path(partition_dir, file_name)
-            storage.write_parquet(group_df, file_path)
+            storage.write_parquet(_stamp_field_ids(group_df, columns), file_path)
 
             file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
@@ -2044,7 +2074,7 @@ class DuckLakeCatalogWriter:
 
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = storage.join_path(base, file_name)
-            storage.write_parquet(df, file_path)
+            storage.write_parquet(_stamp_field_ids(df, columns), file_path)
 
             file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
@@ -2160,7 +2190,7 @@ class DuckLakeCatalogWriter:
 
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = storage.join_path(partition_dir, file_name)
-            storage.write_parquet(group_df, file_path)
+            storage.write_parquet(_stamp_field_ids(group_df, columns), file_path)
 
             file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
@@ -2724,7 +2754,7 @@ class DuckLakeCatalogWriter:
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
                 file_path = storage.join_path(partition_dir, file_name)
-                storage.write_parquet(group_df, file_path)
+                storage.write_parquet(_stamp_field_ids(group_df, columns), file_path)
 
                 file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
@@ -2755,7 +2785,7 @@ class DuckLakeCatalogWriter:
 
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = storage.join_path(base, file_name)
-            storage.write_parquet(updated_df, file_path)
+            storage.write_parquet(_stamp_field_ids(updated_df, columns), file_path)
 
             file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
@@ -3128,7 +3158,7 @@ class DuckLakeCatalogWriter:
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
                 file_path = storage.join_path(partition_dir, file_name)
-                storage.write_parquet(gdf, file_path)
+                storage.write_parquet(_stamp_field_ids(gdf, columns), file_path)
 
                 file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
@@ -3160,7 +3190,7 @@ class DuckLakeCatalogWriter:
 
             file_name = f"ducklake-{_uuid7()}.parquet"
             file_path = storage.join_path(base, file_name)
-            storage.write_parquet(insert_df, file_path)
+            storage.write_parquet(_stamp_field_ids(insert_df, columns), file_path)
 
             file_size = storage.get_file_size(file_path)
             footer_size = _read_parquet_footer_size(file_path)
@@ -4355,7 +4385,7 @@ class DuckLakeCatalogWriter:
 
                     file_name = f"ducklake-{_uuid7()}.parquet"
                     file_path = storage.join_path(partition_dir, file_name)
-                    storage.write_parquet(group_df, file_path)
+                    storage.write_parquet(_stamp_field_ids(group_df, columns), file_path)
 
                     file_size = storage.get_file_size(file_path)
                     footer_size = _read_parquet_footer_size(file_path)
@@ -4384,7 +4414,7 @@ class DuckLakeCatalogWriter:
 
                 file_name = f"ducklake-{_uuid7()}.parquet"
                 file_path = storage.join_path(base, file_name)
-                storage.write_parquet(combined, file_path)
+                storage.write_parquet(_stamp_field_ids(combined, columns), file_path)
 
                 file_size = storage.get_file_size(file_path)
                 footer_size = _read_parquet_footer_size(file_path)
