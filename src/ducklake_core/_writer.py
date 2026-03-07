@@ -379,6 +379,8 @@ class DuckLakeCatalogWriter:
         max_retries: int = 3,
         retry_wait_ms: float = 100,
         retry_backoff: float = 2.0,
+        max_snapshot_retries: int = 5,
+        snapshot_retry_wait_ms: float = 50,
     ) -> None:
         self._backend = create_backend(metadata_path, data_path=data_path_override)
         self._metadata_path = metadata_path
@@ -394,9 +396,14 @@ class DuckLakeCatalogWriter:
         self._retry_wait_ms = retry_wait_ms
         self._retry_backoff = retry_backoff
 
+        # Snapshot ID collision retry settings
+        self._max_snapshot_retries = max_snapshot_retries
+        self._snapshot_retry_wait_ms = snapshot_retry_wait_ms
+
         # Per-transaction conflict tracking state
         self._txn_start_snapshot: int | None = None
         self._txn_conflict_tables: dict[int, str] = {}
+        self._txn_touched_columns: dict[int, set[str]] = {}
 
     @property
     def _is_v04(self) -> bool:
@@ -454,6 +461,7 @@ class DuckLakeCatalogWriter:
             self._con = None
         self._txn_start_snapshot = None
         self._txn_conflict_tables = {}
+        self._txn_touched_columns = {}
 
     def _acquire_write_lock(self) -> None:
         """Upgrade to IMMEDIATE transaction on SQLite to hold the write lock."""
@@ -463,8 +471,14 @@ class DuckLakeCatalogWriter:
         """Begin tracking a write transaction for conflict detection."""
         self._txn_start_snapshot = start_snapshot_id
         self._txn_conflict_tables = {}
+        self._txn_touched_columns = {}
 
-    def _track_table_write(self, table_id: int, operation: str) -> None:
+    def _track_table_write(
+        self,
+        table_id: int,
+        operation: str,
+        columns: list[str] | None = None,
+    ) -> None:
         """Track a table being modified for conflict detection.
 
         Parameters
@@ -474,9 +488,13 @@ class DuckLakeCatalogWriter:
         operation
             One of ``'insert'``, ``'delete'``, ``'update'``,
             ``'overwrite'``, ``'ddl'``, ``'drop_table'``.
+        columns
+            Optional list of column names being modified (for DDL).
         """
         if table_id not in self._txn_conflict_tables:
             self._txn_conflict_tables[table_id] = operation
+        if columns:
+            self._txn_touched_columns.setdefault(table_id, set()).update(columns)
 
     def _get_concurrent_changes(
         self, start_snapshot_id: int,
@@ -649,6 +667,7 @@ class DuckLakeCatalogWriter:
         self._connect().commit()
         self._txn_start_snapshot = None
         self._txn_conflict_tables = {}
+        self._txn_touched_columns = {}
 
     # ------------------------------------------------------------------
     # Snapshot management
@@ -685,20 +704,54 @@ class DuckLakeCatalogWriter:
 
         The caller must hold the write lock (BEGIN IMMEDIATE on SQLite)
         to prevent concurrent writers from generating the same ID.
+
+        If the INSERT fails with a UNIQUE/PRIMARY KEY constraint
+        violation (another writer created the same snapshot_id), we
+        re-read the latest ID and retry up to ``_max_snapshot_retries``
+        times.  This is the catalog-level OCC recovery path.
         """
+        import sqlite3 as _sqlite3
+
         con = self._connect()
-        row = con.execute(
-            "SELECT COALESCE(MAX(snapshot_id), -1) + 1 FROM ducklake_snapshot"
-        ).fetchone()
-        new_id = row[0]
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00")
-        con.execute(
-            "INSERT INTO ducklake_snapshot "
-            "(snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [new_id, now, schema_version, next_catalog_id, next_file_id],
+
+        for _attempt in range(self._max_snapshot_retries + 1):
+            row = con.execute(
+                "SELECT COALESCE(MAX(snapshot_id), -1) + 1 FROM ducklake_snapshot"
+            ).fetchone()
+            new_id = row[0]
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00")
+            try:
+                con.execute(
+                    "INSERT INTO ducklake_snapshot "
+                    "(snapshot_id, snapshot_time, schema_version, "
+                    "next_catalog_id, next_file_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [new_id, now, schema_version, next_catalog_id, next_file_id],
+                )
+                return new_id
+            except (_sqlite3.IntegrityError, Exception) as exc:
+                exc_name = type(exc).__name__
+                exc_msg = str(exc).lower()
+                is_integrity = (
+                    isinstance(exc, _sqlite3.IntegrityError)
+                    or exc_name == "IntegrityError"
+                    or "unique constraint" in exc_msg
+                    or "duplicate key" in exc_msg
+                )
+                if not is_integrity:
+                    raise
+                # On PostgreSQL, IntegrityError aborts the txn.
+                try:
+                    con.rollback()
+                    con.begin_immediate()
+                except Exception:
+                    pass
+                time.sleep(self._snapshot_retry_wait_ms / 1000.0)
+
+        raise TransactionConflictError(
+            f"Snapshot ID collision: failed to allocate a unique "
+            f"snapshot_id after {self._max_snapshot_retries + 1} attempts"
         )
-        return new_id
 
     def _insert_schema_version(
         self, snapshot_id: int, schema_version: int, table_id: int | None = None
