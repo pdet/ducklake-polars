@@ -2,43 +2,45 @@
 
 > **This project is a proof of concept. It was 100% written by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code/overview) (Anthropic's AI coding agent). It is not intended for production use.**
 
-Pure-Python [Polars](https://pola.rs/) and [Pandas](https://pandas.pydata.org/) integration for [DuckLake](https://ducklake.select/) catalogs — both read and write.
+Pure-Python [Polars](https://pola.rs/), [Pandas](https://pandas.pydata.org/), and [PySpark](https://spark.apache.org/docs/latest/api/python/) integration for [DuckLake](https://ducklake.select/) catalogs — both read and write.
 
-Reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through Polars' native Parquet reader or PyArrow. **No DuckDB runtime dependency.** With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning.
+Reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through each engine's native Parquet reader or PyArrow. **No DuckDB runtime dependency.** With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning. With PySpark you get distributed reads and writes with schema evolution and position-delete handling.
 
 ## Architecture
 
 ```
-┌─────────────────┐  ┌─────────────────┐
-│  ducklake_polars │  │  ducklake_pandas │   ← Thin wrappers (API + reader)
-└────────┬────────┘  └────────┬────────┘
-         │                    │
-         └────────┬───────────┘
-                  │
-         ┌────────▼────────┐
-         │   ducklake_core  │   ← Shared engine (catalog, writer, schema, backend)
-         └─────────────────┘
+┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+│  ducklake_polars │  │  ducklake_pandas │  │  ducklake_pyspark │  ← Thin wrappers (API + reader)
+└────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
+         │                    │                    │
+         └────────────┬───────┴────────────────────┘
+                      │
+             ┌────────▼────────┐
+             │   ducklake_core  │   ← Shared engine (catalog, writer, schema, backend)
+             └─────────────────┘
 ```
 
 - **`ducklake_core`** — All catalog I/O, write operations, schema mapping, and backend adapters. Uses [PyArrow](https://arrow.apache.org/docs/python/) as the internal data representation.
 - **`ducklake_polars`** — Polars-specific reader (lazy `scan_parquet` via `PythonDatasetProvider`), plus a thin API that converts between Polars types and Arrow.
 - **`ducklake_pandas`** — Pandas-specific reader (eager via PyArrow → Pandas conversion), plus a thin API that converts between Pandas types and Arrow.
+- **`ducklake_pyspark`** — PySpark-specific reader (distributed via Spark's native Parquet reader), plus a thin API that converts between PySpark types and Arrow.
 
-Both wrappers delegate to the shared core for writes, DDL, catalog inspection, and maintenance operations.
+All wrappers delegate to the shared core for writes, DDL, catalog inspection, and maintenance operations.
 
 ## Installation
 
 ```bash
 pip install ducklake-dataframe[polars]           # Polars engine
 pip install ducklake-dataframe[pandas]           # Pandas engine
-pip install ducklake-dataframe[polars,pandas]    # Both engines
+pip install ducklake-dataframe[pyspark]          # PySpark engine
+pip install ducklake-dataframe[polars,pandas]    # Polars + Pandas
 pip install ducklake-dataframe[polars,postgres]  # Polars + PostgreSQL catalog
 pip install ducklake-dataframe[polars,s3]        # Polars + S3 object storage
 pip install ducklake-dataframe[all]              # Everything
 ```
 
 **Core dependency:** `pyarrow >= 10.0` only. Everything else is optional:
-- **Engines:** `polars >= 1.0`, `pandas >= 1.5` — install at least one
+- **Engines:** `polars >= 1.0`, `pandas >= 1.5`, `pyspark >= 3.4` — install at least one
 - **Catalogs:** SQLite (built-in), PostgreSQL (`[postgres]`), DuckDB (`[duckdb]`)
 - **Storage:** Local (built-in), S3 (`[s3]`), GCS (`[gcs]`), Azure (`[azure]`)
 
@@ -189,29 +191,33 @@ The reverse also works: write with ducklake-dataframe, query with DuckDB SQL.
 | Function | Description |
 |---|---|
 | `scan_ducklake(path, table, ...)` | Polars-only. Returns a `LazyFrame` with full predicate/projection pushdown and file pruning. |
-| `read_ducklake(path, table, ...)` | Eager read into `DataFrame` (Polars) or `pd.DataFrame` (Pandas). Supports `columns=` for projection. |
+| `read_ducklake(path, table, ...)` | Eager read into `DataFrame` (Polars/PySpark) or `pd.DataFrame` (Pandas). Supports `columns=` for projection. |
+| `read_ducklake_changes(path, table, ...)` | CDC: read insertions and deletions between two snapshot versions. Returns rows with `change_type` column. |
 
-Both support `snapshot_version=`, `snapshot_time=`, `schema=`, and `data_path=` overrides.
+All read functions support `snapshot_version=`, `snapshot_time=`, `schema=`, and `data_path=` overrides.
 
 Pandas `read_ducklake` also accepts `predicate=` (a callable `df -> Series[bool]`) for partition and stats-based file pruning.
+
+PySpark `read_ducklake` takes `spark` as the first argument (the active `SparkSession`).
 
 ### Write operations
 
 | Function | Description |
 |---|---|
-| `write_ducklake(df, path, table, mode=...)` | Insert data. Modes: `"error"` (default), `"append"`, `"overwrite"`. |
+| `write_ducklake(df, path, table, mode=...)` | Insert data. Modes: `"error"` (default), `"append"`, `"overwrite"`. Supports `schema_evolution="merge"` for auto-adding new columns. |
 | `create_table_as_ducklake(df, path, table)` | Create table + insert data in a single atomic snapshot. |
-| `delete_ducklake(path, table, predicate)` | Delete matching rows. Polars: `pl.Expr`; Pandas: callable or `True`. |
+| `delete_ducklake(path, table, predicate)` | Delete matching rows. Polars: `pl.Expr`; Pandas: callable or `True`; PySpark: SQL string. |
 | `update_ducklake(path, table, updates, predicate)` | Atomic delete + insert for matched rows. |
 | `merge_ducklake(path, table, source_df, on=...)` | Upsert with `when_matched_update` and `when_not_matched_insert`. |
+| `add_files_ducklake(path, table, file_paths)` | Register existing Parquet files into a table without copying. |
 
-All write operations support `author=` and `commit_message=` for snapshot metadata, and `data_inlining_row_limit=` for small-data inlining.
+All write operations support `author=` and `commit_message=` for snapshot metadata, `data_inlining_row_limit=` for small-data inlining, and OCC retry parameters (`max_retries=`, `retry_wait_ms=`).
 
 ### DDL operations
 
 | Function | Description |
 |---|---|
-| `create_ducklake_table(path, table, schema)` | Create an empty table. Polars: `pl.Schema`; Pandas: `dict[str, str]` of DuckDB types. |
+| `create_ducklake_table(path, table, schema)` | Create an empty table. Polars: `pl.Schema`; Pandas: `dict[str, str]` of DuckDB types; PySpark: `StructType`. |
 | `drop_ducklake_table(path, table)` | Drop a table. |
 | `rename_ducklake_table(path, old, new)` | Rename a table. |
 | `alter_ducklake_add_column(path, table, col, dtype)` | Add a column (with optional `default=`). |
@@ -263,6 +269,70 @@ Polars wrapper returns `pl.DataFrame`; Pandas wrapper returns `pd.DataFrame`; co
 |---|---|
 | `expire_snapshots(path, keep_last_n=)` | Remove old snapshot metadata. Also accepts `older_than_snapshot=`. |
 | `vacuum_ducklake(path)` | Delete orphaned Parquet files not referenced by the catalog. |
+| `rewrite_data_files_ducklake(path, table)` | Compact data files — merges small files and applies pending deletes. |
+
+## Optimistic Concurrency Control (OCC)
+
+All write operations use optimistic concurrency control to detect and handle concurrent writes safely. When a transaction commits, it validates against the latest catalog state and raises `TransactionConflictError` if a conflict is detected.
+
+### Conflict detection
+
+Conflicts are detected on:
+- **Table-level**: concurrent DDL on the same table (drop, rename, schema changes)
+- **File-level**: concurrent writes touching the same data files
+- **Partition-level**: concurrent writes to the same partition values
+
+### Automatic retry
+
+Write operations automatically retry on conflict with exponential backoff:
+
+```python
+from ducklake_polars import write_ducklake
+
+write_ducklake(
+    df, "catalog.ducklake", "users",
+    mode="append",
+    max_retries=3,          # Retry up to 3 times on conflict (default)
+    retry_wait_ms=100,      # Initial wait between retries in ms (default)
+    retry_backoff=2.0,      # Exponential backoff multiplier (default)
+)
+```
+
+The core writer also uses snapshot-level retries for INSERT race conditions on the `ducklake_snapshot` table:
+- `max_snapshot_retries=5` — retries on duplicate snapshot ID
+- `snapshot_retry_wait_ms=50` — wait between snapshot retries
+
+### Handling conflicts manually
+
+```python
+from ducklake_core._writer import TransactionConflictError
+
+try:
+    write_ducklake(df, "catalog.ducklake", "users", mode="append", max_retries=0)
+except TransactionConflictError as e:
+    print(f"Conflict: {e}")
+    # Re-read, resolve, retry
+```
+
+## Streaming ingestion
+
+The `DuckLakeStreamWriter` provides buffered micro-batch ingestion with auto-flush and compaction:
+
+```python
+from ducklake_polars import DuckLakeStreamWriter
+
+with DuckLakeStreamWriter("catalog.ducklake", "events", flush_threshold=10_000) as writer:
+    for batch in data_source:
+        writer.append(batch)  # auto-flushes at threshold
+    # auto-compacts on close
+
+print(f"Wrote {writer.total_rows} rows in {writer.flush_count} flushes")
+```
+
+Parameters:
+- `flush_threshold=10000` — rows before auto-flush
+- `compact_on_close=True` — run `rewrite_data_files` on close
+- `schema_evolution="strict"` — or `"merge"` to auto-add new columns
 
 ## Features
 
@@ -275,6 +345,7 @@ Polars wrapper returns `pl.DataFrame`; Pandas wrapper returns `pd.DataFrame`; co
 - **Schema evolution** — ADD/DROP/RENAME COLUMN handled transparently across file versions
 - **Inlined data** — small tables stored directly in catalog metadata, read transparently
 - **Column renames** — old Parquet files with old column names seamlessly reconciled via column history
+- **Change data capture** — `read_ducklake_changes()` returns insertions/deletions between snapshots
 
 ### Write path
 - **INSERT** — append, overwrite, or error-on-exists modes
@@ -282,10 +353,14 @@ Polars wrapper returns `pl.DataFrame`; Pandas wrapper returns `pd.DataFrame`; co
 - **UPDATE** — atomic delete + insert in a single snapshot
 - **MERGE** — upsert with configurable matched/unmatched behavior
 - **CREATE TABLE AS** — single-snapshot table creation with data
+- **ADD FILES** — register existing Parquet files without copying
 - **Data inlining** — small inserts stored as rows in catalog metadata (configurable threshold)
 - **Partitioned writes** — Hive-style directory layout per partition key
 - **Sort keys** — data sorted before writing Parquet for better row group statistics
 - **Author/commit metadata** — `author=` and `commit_message=` on all write operations
+- **Schema evolution on write** — `schema_evolution="merge"` auto-adds new columns
+- **Streaming ingestion** — `DuckLakeStreamWriter` for buffered micro-batch writes with auto-compaction
+- **Optimistic concurrency control** — automatic conflict detection and retry with exponential backoff
 
 ### DDL
 - **CREATE/DROP TABLE** with full snapshot versioning
@@ -297,6 +372,11 @@ Polars wrapper returns `pl.DataFrame`; Pandas wrapper returns `pd.DataFrame`; co
 - **SET/RESET SORTED BY** — with `ASC`/`DESC` and `NULLS_FIRST`/`NULLS_LAST`
 - **CREATE/DROP VIEW** with `OR REPLACE` support
 - **Tags** — key-value metadata on tables and columns (interoperable with DuckDB's `COMMENT ON`)
+
+### Maintenance
+- **`expire_snapshots`** — remove old snapshot metadata
+- **`vacuum_ducklake`** — delete orphaned Parquet files
+- **`rewrite_data_files_ducklake`** — compact small files and apply pending deletes
 
 ### Catalog backends
 - **SQLite** — Python stdlib `sqlite3` (zero dependency)
@@ -366,10 +446,41 @@ Key differences from the Polars wrapper:
 
 All DDL operations, catalog inspection, tags, sort keys, views, and maintenance functions share the same signatures.
 
+## PySpark usage
+
+The `ducklake_pyspark` package provides PySpark integration with the same DuckLake catalogs:
+
+```python
+from pyspark.sql import SparkSession
+from ducklake_pyspark import read_ducklake, write_ducklake, delete_ducklake
+
+spark = SparkSession.builder.getOrCreate()
+
+# Read — returns a PySpark DataFrame
+df = read_ducklake(spark, "catalog.ducklake", "users")
+
+# Write
+write_ducklake(df, "catalog.ducklake", "users", mode="append")
+
+# Delete (predicate is a SQL string)
+deleted = delete_ducklake("catalog.ducklake", "users", "id > 10")
+
+# CDC — read changes between snapshots
+from ducklake_pyspark import read_ducklake_changes
+changes = read_ducklake_changes(spark, "catalog.ducklake", "users", start_snapshot=1, end_snapshot=5)
+```
+
+Key differences from the Polars wrapper:
+- `read_ducklake` takes `spark` (SparkSession) as the first argument
+- `create_ducklake_table` takes a PySpark `StructType` instead of Polars types
+- DML predicates are SQL strings (`"id > 10"`) instead of `pl.Expr`
+- Includes `add_files_ducklake` for registering existing Parquet files
+- Includes `rewrite_data_files_ducklake` for compaction
+
+See the [PySpark wiki page](https://github.com/pdet/ducklake-polars/wiki/PySpark) for complete API documentation and examples.
+
 ## Known limitations
 
-- **No object storage** — local filesystem only (no S3, GCS, Azure). This is the main production blocker.
-- **No concurrent write safety** — no optimistic concurrency control or conflict detection. Single-writer scenarios only.
 - **No UNION type** — DuckDB's UNION type is not mapped.
 - **No MySQL backend** — only SQLite, PostgreSQL, and DuckDB.
 - **No Parquet encryption** — encrypted DuckLake files cannot be read or written.
@@ -389,17 +500,21 @@ src/
 │   ├── _catalog.py            Metadata reader (snapshots, tables, columns, files, stats)
 │   ├── _catalog_api.py        DuckLakeCatalog inspection class (returns pa.Table)
 │   ├── _schema.py             DuckDB type ↔ Arrow type mapping
-│   └── _writer.py             Catalog writer (all DDL, DML, maintenance)
+│   └── _writer.py             Catalog writer (all DDL, DML, maintenance, OCC)
 ├── ducklake_polars/           Polars wrapper
-│   ├── __init__.py            Public API (scan/read/write/DDL/DML)
+│   ├── __init__.py            Public API (scan/read/write/DDL/DML/streaming)
 │   ├── _catalog_api.py        DuckLakeCatalog returning Polars DataFrames
 │   ├── _dataset.py            PythonDatasetProvider (lazy scan_parquet)
 │   ├── _schema.py             DuckDB type → Polars type mapping
 │   └── _stats.py              Column statistics for Polars file pruning
-└── ducklake_pandas/           Pandas wrapper
-    ├── __init__.py            Public API (read/write/DDL/DML)
-    ├── _catalog_api.py        DuckLakeCatalog returning Pandas DataFrames
-    └── _writer.py             Thin wrapper over core writer
+├── ducklake_pandas/           Pandas wrapper
+│   ├── __init__.py            Public API (read/write/DDL/DML)
+│   ├── _catalog_api.py        DuckLakeCatalog returning Pandas DataFrames
+│   └── _writer.py             Thin wrapper over core writer
+└── ducklake_pyspark/          PySpark wrapper
+    ├── __init__.py            Public API (read/write/DDL/DML/CDC)
+    ├── _ddl.py                DDL, maintenance, and catalog read operations
+    └── _writer.py             PySpark ↔ Arrow conversion utilities
 ```
 
 ## Development
@@ -421,7 +536,7 @@ pytest -k "test_views"    # Specific pattern
 DUCKLAKE_PG_DSN="postgresql://user:pass@localhost/testdb" pytest
 ```
 
-Test suite: **590+ tests** (5 xfailed for known DuckDB/Polars limitations). Tests are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. Both wrappers are tested for interoperability with DuckDB's native extension.
+Test suite: **1,527+ tests** (5 xfailed for known DuckDB/Polars limitations). Tests cover all three engines (Polars, Pandas, PySpark) and are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. All wrappers are tested for interoperability with DuckDB's native extension.
 
 ### Benchmarks
 
