@@ -68,6 +68,7 @@ class TestBootstrapCatalog:
             "ducklake_delete_file",
             "ducklake_file_column_stats",
             "ducklake_file_partition_value",
+            "ducklake_file_variant_stats",
             "ducklake_files_scheduled_for_deletion",
             "ducklake_inlined_data_tables",
             "ducklake_column_mapping",
@@ -79,6 +80,11 @@ class TestBootstrapCatalog:
             "ducklake_tag",
             "ducklake_column_tag",
             "ducklake_view",
+            "ducklake_sort_info",
+            "ducklake_sort_expression",
+            "ducklake_macro",
+            "ducklake_macro_impl",
+            "ducklake_macro_parameters",
         ])
         assert tables == expected_tables
 
@@ -93,7 +99,7 @@ class TestBootstrapCatalog:
         con.close()
 
         keys = {r[0]: r[1] for r in rows}
-        assert keys["version"] == "0.3"
+        assert keys["version"] == "0.4"
         assert keys["created_by"] == "ducklake-dataframe"
         assert keys["encrypted"] == "false"
         assert "data_path" in keys

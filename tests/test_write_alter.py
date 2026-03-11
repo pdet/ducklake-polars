@@ -853,7 +853,7 @@ class TestSortKeys:
         con.install_extension("ducklake")
         con.load_extension("ducklake")
         con.execute(
-            f"ATTACH 'ducklake:{cat.metadata_path}' AS ducklake "
+            f"ATTACH 'ducklake:sqlite:{cat.metadata_path}' AS ducklake "
             f"(DATA_PATH '{cat.data_path}')"
         )
 

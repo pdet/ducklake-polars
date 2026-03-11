@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
-# DDL for the 22 DuckLake catalog tables (matches DuckDB v0.3 catalog layout)
+# DDL for the DuckLake catalog tables (matches DuckDB v0.4 catalog layout)
 # ---------------------------------------------------------------------------
 
 _CATALOG_DDL: list[str] = [
@@ -43,7 +43,8 @@ _CATALOG_DDL: list[str] = [
     )""",
     """CREATE TABLE ducklake_schema_versions(
         begin_snapshot BIGINT,
-        schema_version BIGINT
+        schema_version BIGINT,
+        table_id BIGINT
     )""",
     """CREATE TABLE ducklake_table(
         table_id BIGINT,
@@ -66,7 +67,9 @@ _CATALOG_DDL: list[str] = [
         initial_default VARCHAR,
         default_value VARCHAR,
         nulls_allowed BIGINT,
-        parent_column BIGINT
+        parent_column BIGINT,
+        default_value_type VARCHAR,
+        default_value_dialect VARCHAR
     )""",
     """CREATE TABLE ducklake_data_file(
         data_file_id BIGINT PRIMARY KEY,
@@ -83,8 +86,8 @@ _CATALOG_DDL: list[str] = [
         row_id_start BIGINT,
         partition_id BIGINT,
         encryption_key VARCHAR,
-        partial_file_info VARCHAR,
-        mapping_id BIGINT
+        mapping_id BIGINT,
+        partial_max BIGINT
     )""",
     """CREATE TABLE ducklake_delete_file(
         delete_file_id BIGINT PRIMARY KEY,
@@ -98,7 +101,8 @@ _CATALOG_DDL: list[str] = [
         delete_count BIGINT,
         file_size_bytes BIGINT,
         footer_size BIGINT,
-        encryption_key VARCHAR
+        encryption_key VARCHAR,
+        partial_max BIGINT
     )""",
     """CREATE TABLE ducklake_file_column_stats(
         data_file_id BIGINT,
@@ -117,6 +121,20 @@ _CATALOG_DDL: list[str] = [
         table_id BIGINT,
         partition_key_index BIGINT,
         partition_value VARCHAR
+    )""",
+    """CREATE TABLE ducklake_file_variant_stats(
+        data_file_id BIGINT,
+        table_id BIGINT,
+        column_id BIGINT,
+        variant_path VARCHAR,
+        shredded_type VARCHAR,
+        column_size_bytes BIGINT,
+        value_count BIGINT,
+        null_count BIGINT,
+        min_value VARCHAR,
+        max_value VARCHAR,
+        contains_nan BIGINT,
+        extra_stats VARCHAR
     )""",
     """CREATE TABLE ducklake_files_scheduled_for_deletion(
         data_file_id BIGINT,
@@ -196,6 +214,44 @@ _CATALOG_DDL: list[str] = [
         "sql" VARCHAR,
         column_aliases VARCHAR
     )""",
+    """CREATE TABLE ducklake_sort_info(
+        sort_id BIGINT,
+        table_id BIGINT,
+        begin_snapshot BIGINT,
+        end_snapshot BIGINT
+    )""",
+    """CREATE TABLE ducklake_sort_expression(
+        sort_id BIGINT,
+        table_id BIGINT,
+        sort_key_index BIGINT,
+        expression VARCHAR,
+        dialect VARCHAR,
+        sort_direction VARCHAR,
+        null_order VARCHAR
+    )""",
+    """CREATE TABLE ducklake_macro(
+        schema_id BIGINT,
+        macro_id BIGINT,
+        macro_name VARCHAR,
+        begin_snapshot BIGINT,
+        end_snapshot BIGINT
+    )""",
+    """CREATE TABLE ducklake_macro_impl(
+        macro_id BIGINT,
+        impl_id BIGINT,
+        dialect VARCHAR,
+        "sql" VARCHAR,
+        "type" VARCHAR
+    )""",
+    """CREATE TABLE ducklake_macro_parameters(
+        macro_id BIGINT,
+        impl_id BIGINT,
+        column_id BIGINT,
+        parameter_name VARCHAR,
+        parameter_type VARCHAR,
+        default_value VARCHAR,
+        default_value_type VARCHAR
+    )""",
 ]
 
 
@@ -274,7 +330,7 @@ def bootstrap_catalog(path: str, *, data_path: str | None = None) -> None:
 
         con.execute(
             "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
-            ("version", "0.3"),
+            ("version", "0.4"),
         )
         con.execute(
             "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
@@ -297,7 +353,7 @@ def bootstrap_catalog(path: str, *, data_path: str | None = None) -> None:
             (0, schema_uuid, 0, "main", "main/", 1),
         )
         con.execute(
-            "INSERT INTO ducklake_schema_versions VALUES (?, ?)",
+            "INSERT INTO ducklake_schema_versions VALUES (?, ?, NULL)",
             (0, 0),
         )
 
