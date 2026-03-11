@@ -2638,7 +2638,7 @@ class DuckLakeCatalogWriter:
 
         if not all_matched:
             return None
-        return pa.concat_tables(all_matched) if len(all_matched) > 1 else all_matched[0]
+        return pa.concat_tables(all_matched, promote_options="permissive") if len(all_matched) > 1 else all_matched[0]
 
     @_retryable
     def update_data(
@@ -2729,7 +2729,7 @@ class DuckLakeCatalogWriter:
         if total_updated == 0:
             return 0
 
-        all_matched = pa.concat_tables(matched_dfs) if len(matched_dfs) > 1 else matched_dfs[0]
+        all_matched = pa.concat_tables(matched_dfs, promote_options="permissive") if len(matched_dfs) > 1 else matched_dfs[0]
 
         # Apply updates
         for col_name, value in updates.items():
@@ -2914,7 +2914,7 @@ class DuckLakeCatalogWriter:
 
         if not all_tables:
             return None
-        return pa.concat_tables(all_tables) if len(all_tables) > 1 else all_tables[0]
+        return pa.concat_tables(all_tables, promote_options="permissive") if len(all_tables) > 1 else all_tables[0]
 
     @staticmethod
     def _build_key_match_predicate(
@@ -3063,7 +3063,7 @@ class DuckLakeCatalogWriter:
         if when_not_matched_insert:
             if all_target_key_dfs:
                 all_target_keys = _unique_rows(
-                    pa.concat_tables(all_target_key_dfs)
+                    pa.concat_tables(all_target_key_dfs, promote_options="permissive")
                 )
                 unmatched_source = _anti_join(source_df, all_target_keys, on)
             else:
@@ -3083,7 +3083,7 @@ class DuckLakeCatalogWriter:
 
         if when_matched_update is not None and matched_target_dfs:
             all_matched = (
-                pa.concat_tables(matched_target_dfs)
+                pa.concat_tables(matched_target_dfs, promote_options="permissive")
                 if len(matched_target_dfs) > 1
                 else matched_target_dfs[0]
             )
@@ -3113,7 +3113,7 @@ class DuckLakeCatalogWriter:
             return (0, 0)
 
         insert_df = (
-            pa.concat_tables(rows_to_insert_parts)
+            pa.concat_tables(rows_to_insert_parts, promote_options="permissive")
             if len(rows_to_insert_parts) > 1
             else rows_to_insert_parts[0]
         )
@@ -4373,7 +4373,7 @@ class DuckLakeCatalogWriter:
                 all_dfs.append(active_df)
 
         if all_dfs:
-            combined = pa.concat_tables(all_dfs, promote_options="default") if len(all_dfs) > 1 else all_dfs[0]
+            combined = pa.concat_tables(all_dfs, promote_options="permissive") if len(all_dfs) > 1 else all_dfs[0]
         else:
             combined = pa.table(
                 {c[1]: pa.array([], type=pa.string()) for c in columns}
