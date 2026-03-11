@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[polars,pandas,dev]"
-      - run: python -m pytest tests/test_basic.py tests/test_pandas_basic.py -x -q
+      - run: python -m pytest tests/test_basic.py tests_pandas/test_basic.py -x -q
 
   publish:
     needs: test
