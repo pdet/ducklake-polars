@@ -6,6 +6,78 @@ Pure-Python [Polars](https://pola.rs/), [Pandas](https://pandas.pydata.org/), an
 
 Reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through each engine's native Parquet reader or PyArrow. **No DuckDB runtime dependency.** With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning. With PySpark you get distributed reads and writes with schema evolution and position-delete handling.
 
+## Why DuckLake?
+
+DuckLake's SQL-database-backed catalog (SQLite or PostgreSQL) turns operations that require rewriting JSON manifest files in Iceberg into simple indexed SQL queries. Here's how `ducklake-dataframe` compares to PyIceberg on identical workloads (100K rows, ARM64 4-core server):
+
+| Category | DuckLake | Iceberg | Speedup |
+|---|---|---|---|
+| **Streaming append** (100 × 1K-row batches) | 1.1s | 9.1s | **8×** |
+| **Scan after streaming** (100 small files) | 0.02s | 0.63s | **30×** |
+| **Schema evolution — rename** (50 ops) | 0.27s | 27.0s | **100×** |
+| **Schema evolution — add column** (50 ops) | 0.26s | 5.0s | **20×** |
+| **Upsert / merge** (50% overlap) | 0.64s | 6.9s | **11×** |
+| **Time travel** (read snapshot 50/100) | 0.01s | 0.26s | **26×** |
+| **Partition pruning** (1 of 20) | 0.01s | 0.04s | **3×** |
+| **Baseline read/write** | ~0.1s | ~0.1s | ~1× |
+
+> DuckLake is fastest where catalogs matter most: schema changes, snapshot lookups, streaming ingestion, and merge. Baseline read/write performance is comparable — the bottleneck there is Parquet I/O, not the catalog.
+>
+> Iceberg wins one benchmark: reads after 50 column renames, where its field-ID-based Parquet metadata avoids name-mapping resolution.
+
+<details>
+<summary>Full benchmark details and methodology</summary>
+
+**Hardware:** ARM64, 4 cores, 7.6 GiB RAM · **Software:** Python 3.11, Polars 1.38.1, PyArrow 23.0.1, DuckDB 1.4.4, PyIceberg 0.11.1, ducklake-dataframe v0.4.0
+
+**Streaming benchmark** (100 batches × 1K rows):
+
+| Scenario | DuckLake | Iceberg | Speedup |
+|---|---|---|---|
+| Streaming append | 1.10s (90K rows/s) | 9.08s (11K rows/s) | 8.2× |
+| Read-after-write | 0.32s (62K rows/s) | 2.07s (10K rows/s) | 6.4× |
+| Scan + filter | 0.02s (4.7M rows/s) | 0.63s (158K rows/s) | 29.5× |
+| Aggregation | 0.02s (5.0M rows/s) | 0.55s (183K rows/s) | 27.3× |
+| Compaction | 0.12s (100→1 files) | N/A | — |
+| Time travel | 0.003s | 0.011s | 3.6× |
+
+**Schema evolution** (50 ops, 100K rows):
+
+| Scenario | DuckLake | Iceberg | Speedup |
+|---|---|---|---|
+| Add column (50×) | 0.26s (196 ops/s) | 5.01s (10 ops/s) | 19.6× |
+| Read after adds | 0.02s (6.3M rows/s) | 0.04s (2.3M rows/s) | 2.8× |
+| Rename column (50×) | 0.27s (184 ops/s) | 27.0s (2 ops/s) | 99.5× |
+| Read after renames | 0.07s (1.4M rows/s) | 0.03s (3.6M rows/s) | 0.4× *(Iceberg faster)* |
+| Schema churn (50 cycles) | 0.53s (190 ops/s) | 3.73s (27 ops/s) | 7.1× |
+| Wide table projection (200→5 cols) | 0.02s (6.5M rows/s) | 0.03s (3.3M rows/s) | 2.0× |
+
+**DML** (100K rows, 20 delete rounds):
+
+| Scenario | DuckLake | Iceberg | Speedup |
+|---|---|---|---|
+| Selective delete (10%) | 0.08s (1.2M rows/s) | 0.12s (855K rows/s) | 1.4× |
+| Read after delete | 0.02s (4.5M rows/s) | 0.02s (3.9M rows/s) | 1.2× |
+| Bulk update (20%) | 0.10s (1.0M rows/s) | 0.10s (1.0M rows/s) | ~1.0× |
+| Upsert merge (50% overlap) | 0.64s (157K rows/s) | 6.91s (14K rows/s) | 10.9× |
+| Delete cascade (20 rounds) | 2.40s (42K rows/s) | 5.53s (18K rows/s) | 2.3× |
+
+**Catalog operations** (100 snapshots, 50K rows):
+
+| Scenario | DuckLake | Iceberg | Speedup |
+|---|---|---|---|
+| Cold start (create→read) | 0.33s | 0.47s | 1.4× |
+| Snapshot history (100) | 0.002s | 0.006s | 2.9× |
+| Multi-table list (100) | 0.001s | 0.003s | 2.8× |
+| Partition pruning (1/20) | 0.01s (8.9M rows/s) | 0.04s (2.8M rows/s) | 3.2× |
+| Time travel (snap 50/100) | 0.01s (2.5M rows/s) | 0.26s (99K rows/s) | 26.0× |
+
+Run the benchmarks yourself: `python benchmarks/bench_streaming.py --batches 100 --batch-size 1000`
+
+See the [full benchmark wiki](https://github.com/pdet/ducklake-dataframe/wiki/Benchmarks) for details.
+
+</details>
+
 ## Architecture
 
 ```
