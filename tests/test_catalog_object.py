@@ -152,6 +152,96 @@ class TestCatalogMaintenance:
         assert snap2 == -1
 
 
+class TestCatalogObjectAdvanced:
+    """Forms exposed only via free functions before — now reachable on
+    the ``DuckLakeCatalog`` object."""
+
+    def test_set_partitioned_by_year_transform(self, tmp_path):
+        import datetime
+        import sqlite3
+
+        from ducklake_polars._catalog_api import DuckLakeCatalog
+
+        path = str(tmp_path / "c.ducklake")
+        data_path = str(tmp_path / "data")
+        cat = DuckLakeCatalog(path, data_path=data_path)
+        cat.write(
+            "t",
+            pl.DataFrame({
+                "id": [1],
+                "ts": [datetime.datetime(2024, 1, 1)],
+            }),
+        )
+        cat.set_partitioned_by("t", [("ts", "year")])
+
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT pc.transform FROM ducklake_partition_column pc "
+                "JOIN ducklake_partition_info pi "
+                "  ON pc.partition_id = pi.partition_id "
+                "WHERE pi.end_snapshot IS NULL"
+            ).fetchone()
+        finally:
+            con.close()
+        assert row == ("year",)
+
+    def test_set_sort_keys_with_expression(self, tmp_path):
+        import sqlite3
+
+        from ducklake_polars._catalog_api import DuckLakeCatalog
+
+        path = str(tmp_path / "c.ducklake")
+        data_path = str(tmp_path / "data")
+        cat = DuckLakeCatalog(path, data_path=data_path)
+        cat.write("t", pl.DataFrame({"id": [1, 2]}))
+        cat.set_sort_keys(
+            "t",
+            [{"expression": "id + 1", "direction": "DESC"}],
+        )
+
+        con = sqlite3.connect(path)
+        try:
+            row = con.execute(
+                "SELECT se.expression, se.sort_direction "
+                "FROM ducklake_sort_expression se "
+                "JOIN ducklake_sort_info si ON se.sort_id = si.sort_id "
+                "WHERE si.end_snapshot IS NULL"
+            ).fetchone()
+        finally:
+            con.close()
+        assert row == ("id + 1", "DESC")
+
+    def test_expire_snapshots_keeps_latest(self, tmp_path):
+        import sqlite3
+
+        from ducklake_polars._catalog_api import DuckLakeCatalog
+
+        path = str(tmp_path / "c.ducklake")
+        data_path = str(tmp_path / "data")
+        cat = DuckLakeCatalog(path, data_path=data_path)
+        for i in range(5):
+            cat.write(
+                "t", pl.DataFrame({"id": [i]}),
+                mode="append" if i else "error",
+            )
+
+        # Keep only the most recent snapshot.
+        cat.expire_snapshots(retain_last=1)
+
+        con = sqlite3.connect(path)
+        try:
+            n = con.execute(
+                "SELECT COUNT(*) FROM ducklake_snapshot"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        assert n == 1
+        # The surviving snapshot still exposes the full data.
+        df = cat.read("t").sort("id")
+        assert df["id"].to_list() == [0, 1, 2, 3, 4]
+
+
 class TestCatalogMetadata:
     """Metadata queries through catalog."""
 

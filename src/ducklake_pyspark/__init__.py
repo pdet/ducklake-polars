@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from pyspark.sql.types import StructType
 
 from ducklake_core._catalog import DuckLakeCatalogReader
+from ducklake_core._migration import migrate_catalog
 from ducklake_core._writer import TransactionConflictError
 from ducklake_pyspark._ddl import (
     alter_ducklake_add_column,
@@ -54,6 +55,7 @@ from ducklake_pyspark._ddl import (
 )
 
 __all__ = [
+    "migrate_catalog",
     "read_ducklake",
     "read_ducklake_changes",
     "TransactionConflictError",

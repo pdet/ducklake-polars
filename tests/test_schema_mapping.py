@@ -73,6 +73,20 @@ class TestSimpleTypes:
             ("geometry", pl.Binary()),
             ("variant", pl.String()),
             ("unknown", pl.String()),
+            # Per-shape geometry sub-types (DuckLake spatial extension)
+            ("point", pl.Binary()),
+            ("linestring", pl.Binary()),
+            ("polygon", pl.Binary()),
+            ("multipoint", pl.Binary()),
+            ("multilinestring", pl.Binary()),
+            ("multipolygon", pl.Binary()),
+            ("geometrycollection", pl.Binary()),
+            ("point_z", pl.Binary()),
+            ("linestring_zm", pl.Binary()),
+            ("polygon_m", pl.Binary()),
+            ("multipoint_z", pl.Binary()),
+            ("multipolygon_zm", pl.Binary()),
+            ("wkb_blob", pl.Binary()),
         ],
     )
     def test_simple_type_mapping(self, duckdb_type, expected):

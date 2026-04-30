@@ -567,11 +567,17 @@ class DuckLakeCatalog(_CoreCatalog):
     def set_partitioned_by(
         self,
         table: str,
-        columns: list[str],
+        columns: list[str | tuple[str, str]],
         *,
         schema: str = "main",
     ) -> None:
-        """Set partition columns."""
+        """Set partition columns.
+
+        Each entry is either a column name (identity transform) or a
+        ``(column_name, transform)`` tuple where ``transform`` is one
+        of ``"identity"``, ``"year"``, ``"month"``, ``"day"``,
+        ``"hour"``.
+        """
         from ducklake_polars import alter_ducklake_set_partitioned_by
 
         alter_ducklake_set_partitioned_by(
@@ -585,11 +591,20 @@ class DuckLakeCatalog(_CoreCatalog):
     def set_sort_keys(
         self,
         table: str,
-        keys: list[tuple[str, str]],
+        keys,
         *,
         schema_name: str = "main",
     ) -> None:
-        """Set sort keys. keys = [(col, 'ASC'|'DESC'), ...]."""
+        """Set sort keys.
+
+        Accepts the same forms as ``alter_ducklake_set_sort_keys``:
+
+        * ``[col_name, ...]`` — bare column refs (default ASC,
+          NULLS_LAST).
+        * ``[(col_name, "ASC"|"DESC"[, "NULLS_FIRST"|"NULLS_LAST"]), ...]``
+        * ``[{"expression": "...", "direction": ..., "null_order": ...,
+          "dialect": ..., "is_expression": True}, ...]``
+        """
         from ducklake_polars import alter_ducklake_set_sort_keys
 
         alter_ducklake_set_sort_keys(
@@ -619,16 +634,22 @@ class DuckLakeCatalog(_CoreCatalog):
     def expire_snapshots(
         self,
         *,
-        older_than: str | None = None,
+        older_than_snapshot: int | None = None,
         retain_last: int | None = None,
     ) -> int:
-        """Expire old snapshots. Returns number expired."""
+        """Expire old snapshots. Returns number expired.
+
+        Mirrors the free-function ``expire_snapshots``: pass
+        ``older_than_snapshot`` to expire snapshots strictly older than
+        the given snapshot id, or ``retain_last`` to keep the most
+        recent N snapshots.
+        """
         from ducklake_polars import expire_snapshots
 
         return expire_snapshots(
             self._metadata_path,
-            older_than=older_than,
-            retain_last=retain_last,
+            older_than_snapshot=older_than_snapshot,
+            keep_last_n=retain_last,
             data_path=self._data_path_override,
         )
 

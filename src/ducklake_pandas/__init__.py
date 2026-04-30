@@ -21,9 +21,11 @@ if TYPE_CHECKING:
 
 from ducklake_pandas._catalog_api import DuckLakeCatalog
 from ducklake_core._catalog import DuckLakeCatalogReader
+from ducklake_core._migration import migrate_catalog
 from ducklake_core._writer import TransactionConflictError
 
 __all__ = [
+    "migrate_catalog",
     "read_ducklake",
     "write_ducklake",
     "TransactionConflictError",
@@ -46,6 +48,13 @@ __all__ = [
     "expire_snapshots",
     "vacuum_ducklake",
     "rewrite_data_files_ducklake",
+    "merge_adjacent_files_ducklake",
+    "cleanup_old_files_ducklake",
+    "delete_orphaned_files_ducklake",
+    "add_files_ducklake",
+    "create_ducklake_macro",
+    "drop_ducklake_macro",
+    "set_ducklake_option",
     "create_ducklake_view",
     "drop_ducklake_view",
     "set_ducklake_table_tag",
@@ -60,6 +69,8 @@ __all__ = [
     "list_snapshots",
     "snapshot_changes",
     "catalog_info",
+    "read_ducklake_changes",
+    "DuckLakeStreamWriter",
     "DuckLakeCatalog",
 ]
 
@@ -1083,7 +1094,7 @@ def alter_ducklake_rename_column(
 def alter_ducklake_set_partitioned_by(
     path: str | Path,
     table: str,
-    column_names: list[str],
+    column_names: list[str | tuple[str, str]],
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
@@ -1091,7 +1102,13 @@ def alter_ducklake_set_partitioned_by(
     commit_message: str | None = None,
 ) -> None:
     """
-    Set identity-transform partitioning on a DuckLake table.
+    Set partitioning on a DuckLake table.
+
+    Each entry in ``column_names`` is either:
+
+    * a column name (string) — identity transform; or
+    * a ``(column_name, transform)`` tuple — where ``transform`` is one
+      of ``"identity"``, ``"year"``, ``"month"``, ``"day"``, ``"hour"``.
 
     Parameters
     ----------
@@ -1101,7 +1118,7 @@ def alter_ducklake_set_partitioned_by(
     table
         Name of the table to partition.
     column_names
-        Column names to partition by (identity transform).
+        Partition specs (see above).
     schema
         Schema name (default: "main").
     data_path
@@ -1110,7 +1127,8 @@ def alter_ducklake_set_partitioned_by(
     Raises
     ------
     ValueError
-        If the table or any column does not exist.
+        If the table or any column does not exist, or the transform is
+        not applicable to the column type.
     """
     from ducklake_pandas._writer import DuckLakeCatalogWriter
 
@@ -1886,3 +1904,314 @@ def rewrite_data_files_ducklake(
         commit_message=commit_message,
     ) as writer:
         return writer.rewrite_data_files(table, schema_name=schema)
+
+
+def merge_adjacent_files_ducklake(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    min_file_size: int | None = None,
+    max_file_size: int | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int:
+    """Merge adjacent small data files for a table without expiring snapshots.
+
+    Pandas mirror of ``ducklake_polars.merge_adjacent_files_ducklake``;
+    see that function for details. The merged file embeds the
+    ``_ducklake_internal_snapshot_id`` column and the source rows are
+    queued in ``ducklake_files_scheduled_for_deletion``.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.merge_adjacent_files(
+            table, schema_name=schema,
+            min_file_size=min_file_size, max_file_size=max_file_size,
+        )
+
+
+def cleanup_old_files_ducklake(
+    path: str | Path,
+    *,
+    older_than: "datetime | None" = None,
+    cleanup_all: bool = False,
+    dry_run: bool = False,
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """Delete files queued in ``ducklake_files_scheduled_for_deletion``.
+
+    Either ``older_than`` (a ``datetime``) or ``cleanup_all=True`` must
+    be specified.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+    ) as writer:
+        return writer.cleanup_old_files(
+            older_than=older_than, cleanup_all=cleanup_all, dry_run=dry_run,
+        )
+
+
+def delete_orphaned_files_ducklake(
+    path: str | Path,
+    *,
+    dry_run: bool = False,
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """Delete Parquet files in the data path that aren't catalog-referenced."""
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+    ) as writer:
+        return writer.delete_orphaned_files(dry_run=dry_run)
+
+
+def add_files_ducklake(
+    path: str | Path,
+    table: str,
+    file_paths: list[str],
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int:
+    """Register existing Parquet files into a DuckLake table.
+
+    The files are not copied or moved — they are referenced in-place.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.add_files(
+            table, file_paths, schema_name=schema,
+        )
+
+
+def create_ducklake_macro(
+    path: str | Path,
+    macro_name: str,
+    sql: str,
+    *,
+    macro_type: str = "scalar",
+    dialect: str = "duckdb",
+    parameters: list[dict[str, Any]] | None = None,
+    schema: str = "main",
+    or_replace: bool = False,
+    data_path: str | Path | None = None,
+) -> int:
+    """Create a macro / function in the DuckLake catalog.
+
+    Mirrors DuckDB's ``CREATE MACRO``.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        return writer.create_macro(
+            macro_name, sql, macro_type=macro_type, dialect=dialect,
+            parameters=parameters, schema_name=schema, or_replace=or_replace,
+        )
+
+
+def drop_ducklake_macro(
+    path: str | Path,
+    macro_name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None:
+    """Drop a macro from the DuckLake catalog."""
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.drop_macro(macro_name, schema_name=schema)
+
+
+def set_ducklake_option(
+    path: str | Path,
+    key: str,
+    value: Any,
+    *,
+    schema: str | None = None,
+    table_name: str | None = None,
+    data_path: str | Path | None = None,
+) -> None:
+    """Set a scoped DuckLake configuration option.
+
+    See ``ducklake_polars.set_ducklake_option`` for the semantics.
+    """
+    from ducklake_pandas._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.set_option(
+            key, value, schema=schema, table_name=table_name,
+        )
+
+
+def read_ducklake_changes(
+    path: str | Path,
+    table: str,
+    start_version: int,
+    end_version: int,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+):
+    """Read change data feed between two snapshots as a pandas DataFrame.
+
+    Returns a DataFrame with columns:
+    - ``snapshot_id`` (int64)
+    - ``change_type`` (str) — ``'insert'``, ``'delete'``,
+      ``'update_preimage'``, ``'update_postimage'``
+    - All table columns
+    """
+    from ducklake_core._catalog_api import DuckLakeCatalog as _CoreCatalog
+
+    dp = os.fspath(data_path) if data_path is not None else None
+    cat = _CoreCatalog(path, data_path=dp)
+    arrow_table = cat.table_changes(
+        table, start_version, end_version, schema=schema,
+    )
+    return arrow_table.to_pandas()
+
+
+class DuckLakeStreamWriter:
+    """Buffered streaming writer for micro-batch ingestion.
+
+    Pandas mirror of :class:`ducklake_polars.DuckLakeStreamWriter`.
+    Accumulates rows in an internal buffer and flushes to DuckLake when
+    the buffer exceeds ``flush_threshold`` rows. Auto-compacts on close
+    when ``compact_on_close`` is True and more than one flush occurred.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        table: str,
+        *,
+        schema: str = "main",
+        data_path: str | Path | None = None,
+        flush_threshold: int = 10_000,
+        compact_on_close: bool = True,
+        schema_evolution: str = "strict",
+    ) -> None:
+        import pandas as pd  # noqa: F401
+
+        self._path = os.fspath(path)
+        self._table = table
+        self._schema = schema
+        self._data_path = (
+            os.fspath(data_path) if data_path is not None else None
+        )
+        self._flush_threshold = flush_threshold
+        self._compact_on_close = compact_on_close
+        self._schema_evolution = schema_evolution
+        self._buffer: list = []
+        self._buffer_rows = 0
+        self._total_rows = 0
+        self._flush_count = 0
+
+    def __enter__(self) -> "DuckLakeStreamWriter":
+        return self
+
+    def __exit__(self, exc_type: object, *args: object) -> None:
+        # Drop the unflushed buffer on exception; already-flushed batches stay
+        # visible (DuckLake has no cross-flush atomicity).
+        if exc_type is not None:
+            self._buffer.clear()
+            self._buffer_rows = 0
+            return
+        self.close()
+
+    def append(self, df) -> None:
+        """Append a DataFrame to the buffer; auto-flushes at the threshold."""
+        if df is None or len(df) == 0:
+            return
+        self._buffer.append(df)
+        self._buffer_rows += len(df)
+        if self._buffer_rows >= self._flush_threshold:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write buffered data to DuckLake."""
+        import pandas as pd
+
+        if not self._buffer:
+            return
+
+        combined = (
+            pd.concat(self._buffer, ignore_index=True)
+            if len(self._buffer) > 1
+            else self._buffer[0]
+        )
+        write_ducklake(
+            combined,
+            self._path,
+            self._table,
+            schema=self._schema,
+            mode="append",
+            data_path=self._data_path,
+        )
+        self._total_rows += len(combined)
+        self._flush_count += 1
+        self._buffer.clear()
+        self._buffer_rows = 0
+
+    def close(self) -> None:
+        """Flush remaining buffer and optionally compact."""
+        self.flush()
+        if self._compact_on_close and self._flush_count > 1:
+            rewrite_data_files_ducklake(
+                self._path,
+                self._table,
+                schema=self._schema,
+                data_path=self._data_path,
+            )
+
+    @property
+    def total_rows(self) -> int:
+        return self._total_rows + self._buffer_rows
+
+    @property
+    def flush_count(self) -> int:
+        return self._flush_count
+
+    @property
+    def buffer_rows(self) -> int:
+        return self._buffer_rows

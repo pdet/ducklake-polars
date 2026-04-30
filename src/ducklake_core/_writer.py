@@ -139,7 +139,26 @@ class _PlaceholderConnection:
                 self._con.execute("COMMIT")
             except Exception:
                 pass
-            self._con.execute("BEGIN IMMEDIATE")
+            # macOS-specific transient: when DuckDB's ducklake extension has
+            # just released the catalog, the WAL/SHM may briefly remain in a
+            # state where SQLite reports "disk I/O error" on BEGIN IMMEDIATE.
+            # Retry with short backoff before giving up.
+            import sqlite3 as _sqlite3
+            import time as _time
+            last_exc: BaseException | None = None
+            for delay in (0.0, 0.05, 0.1, 0.2, 0.5):
+                if delay:
+                    _time.sleep(delay)
+                try:
+                    self._con.execute("BEGIN IMMEDIATE")
+                    return
+                except _sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "disk i/o error" not in msg and "database is locked" not in msg:
+                        raise
+                    last_exc = exc
+            assert last_exc is not None
+            raise last_exc
 
     def rollback(self) -> None:
         if hasattr(self._con, "isolation_level") and self._con.isolation_level is None:
@@ -155,12 +174,94 @@ class _PlaceholderConnection:
         self._con.close()
 
 
+def _coerce_inlined_values(
+    values: list[Any], arrow_type: pa.DataType | None,
+) -> list[Any]:
+    """Coerce raw SQLite-affinity values to a Python type that pyarrow will
+    accept for ``arrow_type``.
+
+    SQLite stores everything with TEXT/INTEGER/REAL/BLOB affinity, so a
+    DOUBLE column may come back as ``str``, BOOLEAN as ``int`` (0/1),
+    DATE/TIMESTAMP/DECIMAL as ``str``. pyarrow 24+ no longer auto-coerces
+    these, so we do it explicitly. Falls back to leaving the value alone
+    when we don't know how to coerce it; the caller still wraps the
+    final ``pa.array`` call in ``try/except`` so an inferred-from-values
+    array is used as a last resort.
+    """
+    if arrow_type is None:
+        return values
+    if pa.types.is_floating(arrow_type):
+        return [float(v) if isinstance(v, str) else v for v in values]
+    if pa.types.is_integer(arrow_type):
+        return [int(v) if isinstance(v, str) else v for v in values]
+    if pa.types.is_boolean(arrow_type):
+        return [
+            None if v is None
+            else bool(int(v)) if isinstance(v, (int, str)) and not isinstance(v, bool)
+            else bool(v)
+            for v in values
+        ]
+    if pa.types.is_decimal(arrow_type):
+        return [
+            Decimal(v) if isinstance(v, str)
+            else Decimal(str(v)) if isinstance(v, float)
+            else v
+            for v in values
+        ]
+    if pa.types.is_date(arrow_type):
+        return [date.fromisoformat(v) if isinstance(v, str) else v for v in values]
+    if pa.types.is_timestamp(arrow_type):
+        out: list[Any] = []
+        for v in values:
+            if isinstance(v, str):
+                try:
+                    out.append(datetime.fromisoformat(v))
+                except ValueError:
+                    out.append(v)
+            else:
+                out.append(v)
+        return out
+    return values
+
+
 def _stat_value_to_str(value: Any, dtype: pa.DataType) -> str | None:
-    """Serialize a Python value to a DuckLake stat string."""
+    """Serialize a Python value to a DuckLake stat string.
+
+    Matches DuckDB's serialization conventions:
+    * timestamps are written without a colon in the offset (``+00``,
+      not ``+00:00``);
+    * times use ISO ``HH:MM:SS[.ffffff]``;
+    * UUIDs are 36-char canonical lowercase form.
+    """
     if value is None:
         return None
     if pa.types.is_boolean(dtype):
-        return "true" if value else "false"
+        # DuckDB's writer doesn't emit min/max for boolean columns;
+        # we do the same to keep our catalogs byte-identical.
+        return None
+    if pa.types.is_timestamp(dtype):
+        if isinstance(value, datetime):
+            s = value.isoformat(sep=" ")
+        else:
+            s = str(value)
+        # Normalize ``+HH:MM`` → ``+HH`` (DuckDB convention) when the
+        # offset minutes are zero.
+        if len(s) >= 6 and s[-3] == ":" and s[-6] in ("+", "-"):
+            if s[-2:] == "00":
+                s = s[:-3]
+        return s
+    if pa.types.is_time(dtype):
+        # Arrow Time → datetime.time → isoformat() with usec precision
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+    if isinstance(value, (bytes, bytearray)) and len(value) == 16:
+        # UUID columns are stored as 16-byte binary in Parquet; emit
+        # canonical 36-char form for stats.
+        try:
+            return str(uuid.UUID(bytes=bytes(value)))
+        except Exception:
+            return None
     return str(value)
 
 
@@ -210,6 +311,213 @@ def _parse_stat_value(value: str | None, arrow_type: pa.DataType) -> object:
 # ------------------------------------------------------------------
 # Arrow helper functions for join / group-by / unique
 # ------------------------------------------------------------------
+
+# DuckLake column types that accept the year/month/day/hour transforms
+# (per docs/stable/specification/tables/ducklake_partition_column.md).
+_TIMESTAMP_TYPES = {
+    "date", "timestamp", "timestamptz",
+    "timestamp_s", "timestamp_ms", "timestamp_ns",
+}
+_DAY_OR_HOUR_TIMESTAMP_TYPES = {
+    "timestamp", "timestamptz",
+    "timestamp_s", "timestamp_ms", "timestamp_ns",
+}
+
+
+_PARQUET_COMPRESSION_CODECS = {
+    "uncompressed", "snappy", "gzip", "zstd", "brotli", "lz4", "lz4_raw",
+}
+
+_BOOL_OPTIONS = {
+    "auto_compact", "hive_file_pattern", "per_thread_output",
+    "require_commit_message", "write_deletion_vectors", "sort_on_insert",
+}
+
+_UINT_OPTIONS = {
+    "parquet_compression_level", "parquet_row_group_size",
+    "data_inlining_row_limit",
+}
+
+_MEMORY_OPTIONS = {
+    "parquet_row_group_size_bytes", "target_file_size",
+}
+
+_INTERVAL_OPTIONS = {"delete_older_than", "expire_older_than"}
+
+
+def _coerce_bool(option: str, value: Any) -> str:
+    if value is None:
+        raise ValueError(f"The {option} option can't be null.")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        norm = value.strip().lower()
+        if norm in {"true", "1", "yes", "on"}:
+            return "true"
+        if norm in {"false", "0", "no", "off"}:
+            return "false"
+    raise ValueError(
+        f"The {option} option requires a boolean value (got {value!r})"
+    )
+
+
+def _coerce_uint(option: str, value: Any) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"The {option} option requires an unsigned integer "
+            f"(got {value!r})"
+        ) from exc
+    if n < 0:
+        raise ValueError(
+            f"The {option} option requires an unsigned integer (got {n})"
+        )
+    return n
+
+
+def _parse_memory_limit(value: Any) -> int:
+    """Parse a memory limit like ``'128MB'`` / ``'1GiB'`` to bytes."""
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"Cannot parse memory value {value!r}")
+    s = value.strip()
+    if not s:
+        raise ValueError("Empty memory value")
+    units = {
+        "": 1, "B": 1,
+        "K": 1024, "KB": 1024, "KIB": 1024,
+        "M": 1024**2, "MB": 1024**2, "MIB": 1024**2,
+        "G": 1024**3, "GB": 1024**3, "GIB": 1024**3,
+        "T": 1024**4, "TB": 1024**4, "TIB": 1024**4,
+    }
+    i = 0
+    while i < len(s) and (s[i].isdigit() or s[i] in ".-"):
+        i += 1
+    num_part = s[:i].strip()
+    unit_part = s[i:].strip().upper()
+    if unit_part not in units:
+        raise ValueError(f"Unknown memory unit {unit_part!r} in {value!r}")
+    return int(float(num_part) * units[unit_part])
+
+
+def _validate_option_value(option: str, value: Any) -> str:
+    """Validate and normalise a config-option value to its catalog string form.
+
+    Mirrors ``DuckLakeSetOptionBind`` in the C++ extension.
+    """
+    if option == "parquet_compression":
+        if not isinstance(value, str):
+            raise ValueError("parquet_compression must be a string")
+        codec = value.strip().lower()
+        if codec not in _PARQUET_COMPRESSION_CODECS:
+            supported = ", ".join(sorted(_PARQUET_COMPRESSION_CODECS))
+            raise ValueError(
+                f"Unsupported codec {value!r} for parquet, "
+                f"supported options are {supported}"
+            )
+        return codec
+    if option == "parquet_version":
+        v = _coerce_uint(option, value)
+        if v not in (1, 2):
+            raise ValueError("Only Parquet version 1 and 2 are supported")
+        return f"V{v}"
+    if option in _UINT_OPTIONS:
+        n = _coerce_uint(option, value)
+        if option == "parquet_row_group_size" and n == 0:
+            raise ValueError("Row group size cannot be 0")
+        return str(n)
+    if option in _MEMORY_OPTIONS:
+        n = _parse_memory_limit(value)
+        if option == "parquet_row_group_size_bytes" and n == 0:
+            raise ValueError("Row group size bytes cannot be 0")
+        return str(n)
+    if option == "rewrite_delete_threshold":
+        try:
+            f = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "rewrite_delete_threshold must be a float in [0, 1]"
+            ) from exc
+        if f < 0 or f > 1:
+            raise ValueError(
+                "The rewrite_delete_threshold must be between 0 and 1"
+            )
+        return repr(f)
+    if option in _BOOL_OPTIONS:
+        return _coerce_bool(option, value)
+    if option in _INTERVAL_OPTIONS:
+        if value is None:
+            return ""
+        s = str(value).strip()
+        # We don't fully parse intervals here; accept any non-empty string and
+        # let DuckDB validate when read. Empty string means "unset / disabled".
+        return s
+    raise ValueError(f"Unsupported option {option!r}")
+
+
+def _validate_transform_for_type(transform: str, col_type: str, col_name: str) -> None:
+    """Raise ValueError if ``transform`` cannot be applied to ``col_type``."""
+    base = col_type.lower().strip()
+    # Strip parameters (e.g. ``decimal(18,3)``) to keep the comparison simple.
+    if "(" in base:
+        base = base.split("(", 1)[0]
+    if transform == "year" or transform == "month":
+        if base not in _TIMESTAMP_TYPES:
+            raise ValueError(
+                f"Partition transform '{transform}' on column '{col_name}' "
+                f"requires a date/timestamp column (got {col_type!r})"
+            )
+    elif transform == "day":
+        if base not in _TIMESTAMP_TYPES:
+            raise ValueError(
+                f"Partition transform 'day' on column '{col_name}' "
+                f"requires a date/timestamp column (got {col_type!r})"
+            )
+    elif transform == "hour":
+        if base not in _DAY_OR_HOUR_TIMESTAMP_TYPES:
+            raise ValueError(
+                f"Partition transform 'hour' on column '{col_name}' "
+                f"requires a timestamp column (got {col_type!r})"
+            )
+
+
+def _apply_partition_transform(values: pa.Array, transform: str) -> pa.Array:
+    """Apply a DuckLake partition transform to an Arrow column.
+
+    Returns a new Arrow array with the transformed values. Values are
+    int64 for year/month/day/hour (matching the spec's "Result type"
+    column) and unchanged for ``identity``.
+    """
+    if transform == "identity":
+        return values
+    import pyarrow.compute as pc
+
+    if transform == "year":
+        # Years from 1970 (date/timestamp -> int64)
+        return pc.subtract(pc.year(values), pa.scalar(1970, type=pa.int64())).cast(pa.int64())
+    if transform == "month":
+        # Months from 1970-01-01: (year - 1970) * 12 + (month - 1)
+        years = pc.subtract(pc.year(values), pa.scalar(1970, type=pa.int64()))
+        months = pc.subtract(pc.month(values), pa.scalar(1, type=pa.int64()))
+        return pc.add(pc.multiply(years, pa.scalar(12, type=pa.int64())), months).cast(pa.int64())
+    if transform == "day":
+        # Days from 1970-01-01 (Arrow's epoch is the same)
+        epoch = pa.scalar(0, type=pa.date32())
+        if pa.types.is_date(values.type):
+            return pc.cast(values, pa.int32()).cast(pa.int64())
+        # Convert timestamps to days
+        as_date = pc.cast(values, pa.date32())
+        return pc.cast(as_date, pa.int32()).cast(pa.int64())
+    if transform == "hour":
+        # Hours from 1970-01-01 00:00:00
+        as_us = pc.cast(values, pa.timestamp("us"))
+        as_int = pc.cast(as_us, pa.int64())
+        # 3_600_000_000 microseconds in an hour
+        return pc.divide(as_int, pa.scalar(3_600_000_000, type=pa.int64()))
+    raise ValueError(f"Unknown partition transform: {transform!r}")
+
 
 def _group_by_columns(
     table: pa.Table, col_names: list[str],
@@ -1537,15 +1845,21 @@ class DuckLakeCatalogWriter:
             max_val = None
             try:
                 arrow_type = duckdb_type_to_arrow(col_type)
+                ct_lower = col_type.lower()
+                # UUID columns are stored as 16-byte binary in Parquet
+                # but DuckLake emits canonical-form min/max stats for
+                # them (matches DuckLakeColumnStats::ToStats in C++).
+                is_uuid = ct_lower == "uuid"
                 if (
                     pa.types.is_integer(arrow_type)
                     or pa.types.is_floating(arrow_type)
-                    or pa.types.is_boolean(arrow_type)
                     or pa.types.is_string(arrow_type)
                     or pa.types.is_large_string(arrow_type)
                     or pa.types.is_date(arrow_type)
                     or pa.types.is_timestamp(arrow_type)
+                    or pa.types.is_time(arrow_type)
                     or pa.types.is_decimal(arrow_type)
+                    or is_uuid
                 ):
                     if null_count < n:
                         raw_min = pc.min(col_array).as_py()
@@ -1616,33 +1930,44 @@ class DuckLakeCatalogWriter:
         row_id_start: int,
         partition_id: int | None,
         mapping_id: int,
+        *,
+        partial_max: int | None = None,
     ) -> None:
         """Register a single data file in the catalog."""
         con = self._connect()
-        con.execute(
-            "INSERT INTO ducklake_data_file "
-            "(data_file_id, table_id, begin_snapshot, end_snapshot, file_order, "
-            "path, path_is_relative, file_format, record_count, file_size_bytes, "
-            "footer_size, row_id_start, partition_id, encryption_key, "
-            + ("mapping_id, partial_max) "
-               "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, ?, NULL)"
-               if self._is_v04 else
-               "partial_file_info, mapping_id) "
-               "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, NULL, ?)"),
-            [
-                data_file_id,
-                table_id,
-                new_snap,
-                rel_path,
-                True,
-                record_count,
-                file_size,
-                footer_size,
-                row_id_start,
-                partition_id,
-                mapping_id,
-            ],
-        )
+        if self._is_v04:
+            con.execute(
+                "INSERT INTO ducklake_data_file "
+                "(data_file_id, table_id, begin_snapshot, end_snapshot, file_order, "
+                "path, path_is_relative, file_format, record_count, file_size_bytes, "
+                "footer_size, row_id_start, partition_id, encryption_key, "
+                "mapping_id, partial_max) "
+                "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, ?, ?)",
+                [
+                    data_file_id, table_id, new_snap,
+                    rel_path, True, record_count, file_size, footer_size,
+                    row_id_start, partition_id, mapping_id, partial_max,
+                ],
+            )
+        else:
+            if partial_max is not None:
+                raise ValueError(
+                    "partial_max requires a DuckLake v0.4+ catalog "
+                    f"(this catalog is version {self._catalog_version!r})"
+                )
+            con.execute(
+                "INSERT INTO ducklake_data_file "
+                "(data_file_id, table_id, begin_snapshot, end_snapshot, file_order, "
+                "path, path_is_relative, file_format, record_count, file_size_bytes, "
+                "footer_size, row_id_start, partition_id, encryption_key, "
+                "partial_file_info, mapping_id) "
+                "VALUES (?, ?, ?, NULL, NULL, ?, ?, 'parquet', ?, ?, ?, ?, ?, NULL, NULL, ?)",
+                [
+                    data_file_id, table_id, new_snap,
+                    rel_path, True, record_count, file_size, footer_size,
+                    row_id_start, partition_id, mapping_id,
+                ],
+            )
 
     def _register_file_column_stats(
         self,
@@ -1924,11 +2249,36 @@ class DuckLakeCatalogWriter:
         col_id_to_name: dict[int, str] = {c[0]: c[1] for c in columns}
         part_col_names: list[str] = []
         part_key_indices: list[int] = []
+        part_transforms: list[str] = []
         for key_index, col_id, transform in part_cols:
             part_col_names.append(col_id_to_name[col_id])
             part_key_indices.append(key_index)
+            part_transforms.append(transform)
 
-        group_list = _group_by_columns(df, part_col_names)
+        # If any transform is non-identity, group by the transformed values.
+        if any(t != "identity" for t in part_transforms):
+            transformed_columns = []
+            transformed_names = []
+            for name, transform in zip(part_col_names, part_transforms):
+                if transform == "identity":
+                    transformed_columns.append(df.column(name))
+                else:
+                    transformed_columns.append(
+                        _apply_partition_transform(df.column(name).combine_chunks(), transform)
+                    )
+                # Internal alias to avoid colliding with the source column name
+                transformed_names.append(f"__pt_{name}__{transform}")
+            df_with_keys = df
+            for alias, col in zip(transformed_names, transformed_columns):
+                df_with_keys = df_with_keys.append_column(alias, col)
+            group_list = _group_by_columns(df_with_keys, transformed_names)
+            # Strip the alias columns from each group before writing
+            group_list = [
+                (key, grp.drop(transformed_names))
+                for key, grp in group_list
+            ]
+        else:
+            group_list = _group_by_columns(df, part_col_names)
 
         n_files = len(group_list)
 
@@ -2453,6 +2803,11 @@ class DuckLakeCatalogWriter:
         delete_file_size = storage.get_file_size(delete_file_path)
         delete_footer_size = _read_parquet_footer_size(delete_file_path)
 
+        # partial_max is omitted from the column list so this works
+        # against pre-v0.4 catalogs (created by older DuckDB extensions
+        # that didn't ship the partial_max column). Our bootstrap DDL
+        # creates the column with default NULL — equivalent to omitting
+        # it here.
         con.execute(
             "INSERT INTO ducklake_delete_file "
             "(delete_file_id, table_id, begin_snapshot, end_snapshot, "
@@ -2628,8 +2983,36 @@ class DuckLakeCatalogWriter:
             if not rows:
                 continue
 
-            data = {name: [r[i + 1] for r in rows] for i, name in enumerate(col_names)}
-            inline_table = pa.table(data)
+            # Build the Arrow table using the catalog-declared column types,
+            # not pyarrow's inference. SQLite's inlined-data tables store
+            # everything with TEXT/INTEGER/REAL affinity, so without casting
+            # a DOUBLE column comes back as ``string``, a BOOLEAN as ``int``,
+            # a DATE as ``str``, etc. — and downstream update_data can't
+            # apply typed values to those.
+            arrow_fields = []
+            data_arrays: list[pa.Array] = []
+            for i, name in enumerate(col_names):
+                col_values = [r[i + 1] for r in rows]
+                # columns is list[(column_id, column_name, column_type, parent_column)]
+                col_type_str = next(
+                    (c[2] for c in columns if c[1] == name), None
+                )
+                arrow_type: pa.DataType | None = None
+                if col_type_str:
+                    try:
+                        arrow_type = duckdb_type_to_arrow(col_type_str)
+                    except Exception:
+                        arrow_type = None
+                col_values = _coerce_inlined_values(col_values, arrow_type)
+                try:
+                    arr = pa.array(col_values, type=arrow_type)
+                except Exception:
+                    arr = pa.array(col_values)
+                arrow_fields.append(pa.field(name, arr.type))
+                data_arrays.append(arr)
+            inline_table = pa.Table.from_arrays(
+                data_arrays, schema=pa.schema(arrow_fields),
+            )
 
             mask = predicate(inline_table)
             matched = inline_table.filter(mask)
@@ -2888,6 +3271,13 @@ class DuckLakeCatalogWriter:
             return None
 
         col_names = [c[1] for c in columns]
+        col_types_str = [c[2] for c in columns]
+        col_arrow_types: list[pa.DataType | None] = []
+        for t in col_types_str:
+            try:
+                col_arrow_types.append(duckdb_type_to_arrow(t) if t else None)
+            except Exception:
+                col_arrow_types.append(None)
         all_tables: list[pa.Table] = []
 
         for (tbl_name,) in inlined_tables:
@@ -2906,11 +3296,16 @@ class DuckLakeCatalogWriter:
                 continue
 
             if rows:
-                data = {
-                    name: [r[i] for r in rows]
-                    for i, name in enumerate(col_names)
-                }
-                all_tables.append(pa.table(data))
+                arrays: list[pa.Array] = []
+                for i, name in enumerate(col_names):
+                    vals = [r[i] for r in rows]
+                    arrow_type = col_arrow_types[i]
+                    vals = _coerce_inlined_values(vals, arrow_type)
+                    try:
+                        arrays.append(pa.array(vals, type=arrow_type))
+                    except Exception:
+                        arrays.append(pa.array(vals))
+                all_tables.append(pa.table(dict(zip(col_names, arrays))))
 
         if not all_tables:
             return None
@@ -2954,14 +3349,19 @@ class DuckLakeCatalogWriter:
         on: str | list[str],
         *,
         when_matched_update: dict[str, Any] | bool | None = None,
+        when_matched_delete: bool = False,
         when_not_matched_insert: bool = True,
+        when_not_matched_by_source_delete: bool = False,
+        when_not_matched_by_source_update: dict[str, Any] | None = None,
         schema_name: str = "main",
     ) -> tuple[int, int]:
         """
         MERGE *source_df* into an existing table.
 
         Matches rows on the *on* key columns, optionally updates matched
-        target rows, and optionally inserts unmatched source rows.
+        target rows, optionally inserts unmatched source rows, and (per
+        the DuckDB ``MERGE INTO`` grammar) optionally
+        updates/deletes target rows that have no match in *source_df*.
 
         Parameters
         ----------
@@ -2970,12 +3370,44 @@ class DuckLakeCatalogWriter:
             - ``True``: replace matched target rows with source rows.
             - ``dict``: update matched target rows with these values
               (literal or ``Callable[[pa.Table], pa.ChunkedArray]``).
+            Mutually exclusive with ``when_matched_delete``.
+        when_matched_delete
+            If True, matched target rows are deleted (no replacement
+            insert is written). Mutually exclusive with
+            ``when_matched_update``.
         when_not_matched_insert
             If True (default), source rows that have no match in the
             target are inserted.
+        when_not_matched_by_source_delete
+            If True, target rows whose key is not in *source_df* are
+            deleted (``WHEN NOT MATCHED BY SOURCE THEN DELETE``).
+            Mutually exclusive with
+            ``when_not_matched_by_source_update``.
+        when_not_matched_by_source_update
+            Dict mapping column name → literal/callable for
+            ``WHEN NOT MATCHED BY SOURCE THEN UPDATE SET ...``.
+            Mutually exclusive with
+            ``when_not_matched_by_source_delete``.
 
-        Returns ``(rows_updated, rows_inserted)``.
+        Returns ``(rows_changed, rows_inserted)`` where
+        ``rows_changed`` aggregates rows that were updated **or**
+        deleted by either matched / by-source clauses (the catalog still
+        reflects the exact change set, but the count is summed for
+        backwards compatibility with callers that expect a 2-tuple).
         """
+        if when_matched_update is not None and when_matched_delete:
+            raise ValueError(
+                "when_matched_update and when_matched_delete are mutually "
+                "exclusive"
+            )
+        if (
+            when_not_matched_by_source_delete
+            and when_not_matched_by_source_update is not None
+        ):
+            raise ValueError(
+                "when_not_matched_by_source_delete and "
+                "when_not_matched_by_source_update are mutually exclusive"
+            )
         if isinstance(on, str):
             on = [on]
 
@@ -3004,6 +3436,7 @@ class DuckLakeCatalogWriter:
         # ----------------------------------------------------------
         pending_deletes: list[tuple[int, str, list[int]]] = []
         matched_target_dfs: list[pa.Table] = []
+        bysource_target_dfs: list[pa.Table] = []
         all_target_key_dfs: list[pa.Table] = []
 
         for data_file_id, rel_path, path_is_rel, _rc, _rid in data_files:
@@ -3030,28 +3463,69 @@ class DuckLakeCatalogWriter:
             active_df = file_df.drop_columns(["__merge_idx__"])
             all_target_key_dfs.append(_select_columns(active_df, on))
 
-            if when_matched_update is not None:
+            matched_positions: list[int] = []
+            unmatched_positions: list[int] = []
+
+            need_matched = (
+                when_matched_update is not None or when_matched_delete
+            )
+            need_bysource = (
+                when_not_matched_by_source_delete
+                or when_not_matched_by_source_update is not None
+            )
+
+            if need_matched:
                 matched = _semi_join(file_df, source_keys, on)
                 if len(matched) > 0:
-                    positions = sorted(matched.column("__merge_idx__").to_pylist())
-                    pending_deletes.append((data_file_id, abs_path, positions))
-                    matched_target_dfs.append(matched.drop_columns(["__merge_idx__"]))
+                    matched_positions = sorted(
+                        matched.column("__merge_idx__").to_pylist()
+                    )
+                    if when_matched_update is not None:
+                        matched_target_dfs.append(
+                            matched.drop_columns(["__merge_idx__"])
+                        )
+
+            if need_bysource:
+                bysource_unmatched = _anti_join(file_df, source_keys, on)
+                if len(bysource_unmatched) > 0:
+                    unmatched_positions = sorted(
+                        bysource_unmatched.column("__merge_idx__").to_pylist()
+                    )
+                    if when_not_matched_by_source_update is not None:
+                        bysource_target_dfs.append(
+                            bysource_unmatched.drop_columns(["__merge_idx__"])
+                        )
+
+            all_positions = sorted(set(matched_positions + unmatched_positions))
+            if all_positions:
+                pending_deletes.append((data_file_id, abs_path, all_positions))
 
         # ----------------------------------------------------------
         # Phase 2: find matched target rows in inlined data
         # ----------------------------------------------------------
         inlined_matched_df: pa.Table | None = None
+        inlined_bysource_df: pa.Table | None = None
         if inlined_count > 0:
             inlined_df = self._read_all_inlined_active_rows(
                 table_id, snap_id, columns,
             )
             if inlined_df is not None and len(inlined_df) > 0:
                 all_target_key_dfs.append(_select_columns(inlined_df, on))
-                if when_matched_update is not None:
+                if when_matched_update is not None or when_matched_delete:
                     inlined_matched = _semi_join(inlined_df, source_keys, on)
                     if len(inlined_matched) > 0:
                         inlined_matched_df = inlined_matched
-                        matched_target_dfs.append(inlined_matched)
+                        if when_matched_update is not None:
+                            matched_target_dfs.append(inlined_matched)
+                if (
+                    when_not_matched_by_source_delete
+                    or when_not_matched_by_source_update is not None
+                ):
+                    inlined_unmatched = _anti_join(inlined_df, source_keys, on)
+                    if len(inlined_unmatched) > 0:
+                        inlined_bysource_df = inlined_unmatched
+                        if when_not_matched_by_source_update is not None:
+                            bysource_target_dfs.append(inlined_unmatched)
 
         # ----------------------------------------------------------
         # Phase 3: counts and early exit
@@ -3059,6 +3533,8 @@ class DuckLakeCatalogWriter:
         total_updated = sum(len(p) for _, _, p in pending_deletes)
         if inlined_matched_df is not None:
             total_updated += len(inlined_matched_df)
+        if inlined_bysource_df is not None:
+            total_updated += len(inlined_bysource_df)
 
         if when_not_matched_insert:
             if all_target_key_dfs:
@@ -3106,17 +3582,46 @@ class DuckLakeCatalogWriter:
                     all_matched = all_matched.set_column(idx, col_name, new_col)
                 rows_to_insert_parts.append(all_matched)
 
+        if (
+            when_not_matched_by_source_update is not None
+            and bysource_target_dfs
+        ):
+            all_bysource = (
+                pa.concat_tables(bysource_target_dfs, promote_options="permissive")
+                if len(bysource_target_dfs) > 1
+                else bysource_target_dfs[0]
+            )
+            for col_name, value in when_not_matched_by_source_update.items():
+                if callable(value):
+                    new_col = value(all_bysource)
+                else:
+                    col_type = all_bysource.schema.field(col_name).type
+                    new_col = pa.array(
+                        [value] * len(all_bysource), type=col_type,
+                    )
+                idx = all_bysource.schema.get_field_index(col_name)
+                all_bysource = all_bysource.set_column(idx, col_name, new_col)
+            rows_to_insert_parts.append(all_bysource)
+
         if total_inserted > 0:
             rows_to_insert_parts.append(_select_columns(unmatched_source, col_names))
 
-        if not rows_to_insert_parts:
+        # Continue even when there's nothing to insert, as long as we have
+        # delete files to write (matched-delete / by-source-delete).
+        if not rows_to_insert_parts and not pending_deletes \
+                and inlined_matched_df is None and inlined_bysource_df is None:
             return (0, 0)
 
-        insert_df = (
-            pa.concat_tables(rows_to_insert_parts, promote_options="permissive")
-            if len(rows_to_insert_parts) > 1
-            else rows_to_insert_parts[0]
-        )
+        if rows_to_insert_parts:
+            insert_df = (
+                pa.concat_tables(
+                    rows_to_insert_parts, promote_options="permissive",
+                )
+                if len(rows_to_insert_parts) > 1
+                else rows_to_insert_parts[0]
+            )
+        else:
+            insert_df = _empty_like(source_df)
 
         # ----------------------------------------------------------
         # Phase 5: build output dir
@@ -3177,6 +3682,14 @@ class DuckLakeCatalogWriter:
         if inlined_matched_df is not None and len(inlined_matched_df) > 0:
             key_pred = self._build_key_match_predicate(
                 on, _unique_rows(_select_columns(inlined_matched_df, on)),
+            )
+            self._delete_inlined_rows(
+                table_id, key_pred, snap_id, new_snap, columns,
+            )
+
+        if inlined_bysource_df is not None and len(inlined_bysource_df) > 0:
+            key_pred = self._build_key_match_predicate(
+                on, _unique_rows(_select_columns(inlined_bysource_df, on)),
             )
             self._delete_inlined_rows(
                 table_id, key_pred, snap_id, new_snap, columns,
@@ -3307,10 +3820,39 @@ class DuckLakeCatalogWriter:
         arrow_dtype: pa.DataType,
         *,
         default: Any = None,
+        default_expression: str | None = None,
+        default_dialect: str = "duckdb",
         schema_name: str = "main",
     ) -> None:
-        """Add a new column to an existing table."""
+        """Add a new column to an existing table.
+
+        Parameters
+        ----------
+        default
+            Literal default value (any Python scalar). Stored with
+            ``default_value_type='literal'``.
+        default_expression
+            SQL expression string (e.g. ``"now()"``, ``"random()"``).
+            Stored with ``default_value_type='expression'`` and the given
+            ``default_dialect``. Mutually exclusive with ``default``.
+            Only valid for v0.4+ catalogs.
+        default_dialect
+            Dialect identifier for ``default_expression`` (default
+            ``"duckdb"``). Stored verbatim in
+            ``ducklake_column.default_value_dialect``.
+        """
+        if default is not None and default_expression is not None:
+            raise ValueError(
+                "default and default_expression are mutually exclusive"
+            )
+
         con = self._connect()
+        if default_expression is not None and not self._is_v04:
+            raise ValueError(
+                "default_expression requires a DuckLake v0.4+ catalog "
+                "(this catalog is "
+                f"version {self._catalog_version!r})"
+            )
         snapshot_info = self._get_latest_snapshot()
         if snapshot_info is None:
             snap_id, schema_ver, next_cat_id, next_file_id = -1, 0, 1, 1
@@ -3340,23 +3882,40 @@ class DuckLakeCatalogWriter:
 
         new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
 
-        default_str = str(default) if default is not None else None
+        if default_expression is not None:
+            default_str: str | None = default_expression
+            default_value_type: str | None = "expression"
+            default_value_dialect: str | None = default_dialect
+        else:
+            default_str = str(default) if default is not None else None
+            default_value_type = "literal"
+            default_value_dialect = None
 
-        con.execute(
-            "INSERT INTO ducklake_column "
-            "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
-            "column_name, column_type, initial_default, default_value, "
-            "nulls_allowed, parent_column" + (
-                ", default_value_type, default_value_dialect) "
-                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, 'literal', NULL)"
-                if self._is_v04 else
-                ") VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)"
-            ),
-            [
-                new_col_id, new_snap, table_id, new_col_order,
-                column_name, duckdb_type, default_str, default_str, True,
-            ],
-        )
+        if self._is_v04:
+            con.execute(
+                "INSERT INTO ducklake_column "
+                "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
+                "column_name, column_type, initial_default, default_value, "
+                "nulls_allowed, parent_column, default_value_type, default_value_dialect) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                [
+                    new_col_id, new_snap, table_id, new_col_order,
+                    column_name, duckdb_type, default_str, default_str, True,
+                    default_value_type, default_value_dialect,
+                ],
+            )
+        else:
+            con.execute(
+                "INSERT INTO ducklake_column "
+                "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
+                "column_name, column_type, initial_default, default_value, "
+                "nulls_allowed, parent_column) "
+                "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                [
+                    new_col_id, new_snap, table_id, new_col_order,
+                    column_name, duckdb_type, default_str, default_str, True,
+                ],
+            )
 
         self._insert_schema_version(new_snap, new_schema_ver, table_id)
 
@@ -3942,11 +4501,33 @@ class DuckLakeCatalogWriter:
     def set_partitioned_by(
         self,
         table_name: str,
-        column_names: list[str],
+        column_names: list[str] | list[tuple[str, str]],
         *,
         schema_name: str = "main",
     ) -> None:
-        """Set identity-transform partitioning on an existing table."""
+        """Set partitioning on an existing table.
+
+        ``column_names`` accepts either a list of bare column names (each
+        gets the ``identity`` transform) or a list of ``(column_name,
+        transform)`` tuples. Supported transforms are ``identity``,
+        ``year``, ``month``, ``day``, and ``hour`` — matching the DuckLake
+        v1.0 spec.
+        """
+        valid_transforms = {"identity", "year", "month", "day", "hour"}
+
+        normalized: list[tuple[str, str]] = []
+        for entry in column_names:
+            if isinstance(entry, str):
+                normalized.append((entry, "identity"))
+            else:
+                col, transform = entry
+                if transform not in valid_transforms:
+                    raise ValueError(
+                        f"Unsupported partition transform '{transform}'. "
+                        f"Supported: {sorted(valid_transforms)}"
+                    )
+                normalized.append((col, transform))
+
         con = self._connect()
         snapshot_info = self._get_latest_snapshot()
         if snapshot_info is None:
@@ -3963,12 +4544,16 @@ class DuckLakeCatalogWriter:
 
         columns = self._get_columns_for_table(table_id, snap_id)
         col_name_to_id: dict[str, int] = {c[1]: c[0] for c in columns}
-        partition_col_ids: list[int] = []
-        for name in column_names:
+        col_id_to_type: dict[int, str] = {c[0]: c[2] for c in columns}
+        partition_specs: list[tuple[int, str]] = []
+        for name, transform in normalized:
             if name not in col_name_to_id:
                 msg = f"Column '{name}' not found in '{schema_name}.{table_name}'"
                 raise ValueError(msg)
-            partition_col_ids.append(col_name_to_id[name])
+            col_id = col_name_to_id[name]
+            if transform != "identity":
+                _validate_transform_for_type(transform, col_id_to_type[col_id], name)
+            partition_specs.append((col_id, transform))
 
         partition_id = next_cat_id
         new_next_cat_id = next_cat_id + 1
@@ -3983,12 +4568,12 @@ class DuckLakeCatalogWriter:
             [partition_id, table_id, new_snap],
         )
 
-        for key_index, col_id in enumerate(partition_col_ids):
+        for key_index, (col_id, transform) in enumerate(partition_specs):
             con.execute(
                 "INSERT INTO ducklake_partition_column "
                 "(partition_id, table_id, partition_key_index, column_id, transform) "
-                "VALUES (?, ?, ?, ?, 'identity')",
-                [partition_id, table_id, key_index, col_id],
+                "VALUES (?, ?, ?, ?, ?)",
+                [partition_id, table_id, key_index, col_id, transform],
             )
 
         self._insert_schema_version(new_snap, new_schema_ver, table_id)
@@ -4149,19 +4734,29 @@ class DuckLakeCatalogWriter:
         columns = self._get_columns_for_table(table_id, snap_id)
         col_names_set = {c[1] for c in columns}
 
-        # Normalise sort_keys into (name, direction, null_order) triples
-        normalised: list[tuple[str, str, str]] = []
+        # Normalise sort_keys into (expression, direction, null_order, dialect, is_expression)
+        normalised: list[tuple[str, str, str, str, bool]] = []
         for key in sort_keys:
+            dialect = "duckdb"
+            is_expression = False
             if isinstance(key, str):
-                name, direction, null_order = key, "ASC", "NULLS_LAST"
+                expr, direction, null_order = key, "ASC", "NULLS_LAST"
+            elif isinstance(key, dict):
+                expr = key["expression"]
+                direction = key.get("direction", "ASC").upper()
+                null_order = key.get("null_order", "NULLS_LAST").upper()
+                dialect = key.get("dialect", "duckdb")
+                # The dict form is treated as an expression by default;
+                # callers pass a bare column name via the string/tuple form.
+                is_expression = key.get("is_expression", True)
             elif len(key) == 2:
-                name, direction = key[0], key[1].upper()
+                expr, direction = key[0], key[1].upper()
                 null_order = "NULLS_LAST"
             else:
-                name, direction, null_order = key[0], key[1].upper(), key[2].upper()
+                expr, direction, null_order = key[0], key[1].upper(), key[2].upper()
 
-            if name not in col_names_set:
-                msg = f"Column '{name}' not found in '{schema_name}.{table_name}'"
+            if not is_expression and expr not in col_names_set:
+                msg = f"Column '{expr}' not found in '{schema_name}.{table_name}'"
                 raise ValueError(msg)
             if direction not in ("ASC", "DESC"):
                 msg = f"Invalid sort direction '{direction}'; expected ASC or DESC"
@@ -4169,7 +4764,7 @@ class DuckLakeCatalogWriter:
             if null_order not in ("NULLS_FIRST", "NULLS_LAST"):
                 msg = f"Invalid null order '{null_order}'; expected NULLS_FIRST or NULLS_LAST"
                 raise ValueError(msg)
-            normalised.append((name, direction, null_order))
+            normalised.append((expr, direction, null_order, dialect, is_expression))
 
         sort_id = next_cat_id
         new_next_cat_id = next_cat_id + 1
@@ -4194,13 +4789,13 @@ class DuckLakeCatalogWriter:
             [sort_id, table_id, new_snap],
         )
 
-        for key_index, (col_name, direction, null_order) in enumerate(normalised):
+        for key_index, (expr, direction, null_order, dialect, _is_expr) in enumerate(normalised):
             con.execute(
                 "INSERT INTO ducklake_sort_expression "
                 "(sort_id, table_id, sort_key_index, expression, dialect, "
                 "sort_direction, null_order) "
-                "VALUES (?, ?, ?, ?, 'duckdb', ?, ?)",
-                [sort_id, table_id, key_index, col_name, direction, null_order],
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [sort_id, table_id, key_index, expr, dialect, direction, null_order],
             )
 
         self._insert_schema_version(new_snap, new_schema_ver, table_id)
@@ -4236,9 +4831,13 @@ class DuckLakeCatalogWriter:
             raise TableNotFoundError(msg)
         self._track_table_write(table_id, "ddl")
 
-        # Check if there are active sort keys
-        existing = self._get_active_sort_keys(table_id, snap_id)
-        if existing is None:
+        # Check if there are active sort keys (any expression form, not just bare columns)
+        has_active = con.execute(
+            "SELECT 1 FROM ducklake_sort_info "
+            "WHERE table_id = ? AND end_snapshot IS NULL LIMIT 1",
+            [table_id],
+        ).fetchone()
+        if has_active is None:
             return  # Nothing to reset
 
         new_schema_ver = schema_ver + 1
@@ -4525,6 +5124,240 @@ class DuckLakeCatalogWriter:
             new_snap,
             f"inserted_into_table:{table_id},deleted_from_table:{table_id}",
         )
+        self._commit_metadata()
+        return new_snap
+
+    # ------------------------------------------------------------------
+    # MERGE ADJACENT FILES (compaction with partial_max tracking)
+    # ------------------------------------------------------------------
+
+    @_retryable
+    def merge_adjacent_files(
+        self,
+        table_name: str,
+        *,
+        schema_name: str = "main",
+        min_file_size: int | None = None,
+        max_file_size: int | None = None,
+    ) -> int:
+        """Merge adjacent small data files into one without expiring snapshots.
+
+        Mirrors ``ducklake_merge_adjacent_files`` from the DuckDB extension.
+        Per-row snapshot ownership is tracked via the
+        ``_ducklake_internal_snapshot_id`` column embedded in the merged
+        Parquet file; the highest snapshot id present is stored in the
+        new file's ``partial_max`` column. The merged file is registered
+        with ``begin_snapshot`` set to the *minimum* begin_snapshot of its
+        sources so time-travel queries against earlier snapshots see the
+        merged data.
+
+        Returns the new snapshot ID, or ``-1`` if no merge was performed
+        (fewer than two eligible files).
+
+        Notes
+        -----
+        Only files **without active deletes** are merged. Files with
+        delete vectors must be rewritten first via
+        :meth:`rewrite_data_files`.
+        """
+        con = self._connect()
+        if not self._is_v04:
+            raise ValueError(
+                "merge_adjacent_files requires a DuckLake v0.4+ catalog "
+                f"(this catalog is version {self._catalog_version!r})"
+            )
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            return -1
+        snap_id, schema_ver, next_cat_id, next_file_id = snapshot_info
+        self._start_write_transaction(snap_id)
+
+        table_id, table_path, table_path_rel, schema_path, schema_path_rel = (
+            self._get_table_info(table_name, schema_name, snap_id)
+        )
+        self._track_table_write(table_id, "insert")
+
+        columns = self._get_columns_for_table(table_id, snap_id)
+        col_id_to_name = {c[0]: c[1] for c in columns}
+
+        # Fetch eligible files: active, no deletes, no current partial_max.
+        rows = con.execute(
+            "SELECT data_file_id, path, path_is_relative, record_count, "
+            "       row_id_start, partition_id, file_size_bytes, begin_snapshot "
+            "FROM ducklake_data_file "
+            "WHERE table_id = ? AND ? >= begin_snapshot "
+            "AND (? < end_snapshot OR end_snapshot IS NULL) "
+            "ORDER BY file_order, data_file_id",
+            [table_id, snap_id, snap_id],
+        ).fetchall()
+
+        eligible: list[tuple[int, str, bool, int, int, int | None, int, int]] = []
+        for r in rows:
+            (data_file_id, rel_path, path_is_rel, record_count,
+             row_id_start, partition_id, file_size, begin_snap) = r
+            # Skip files with active deletes — they must be rewritten first.
+            positions = self._get_active_delete_positions(
+                data_file_id, table_id, snap_id,
+                table_path, table_path_rel, schema_path, schema_path_rel,
+            )
+            if positions:
+                continue
+            if min_file_size is not None and file_size < min_file_size:
+                continue
+            if max_file_size is not None and file_size >= max_file_size:
+                continue
+            eligible.append((
+                data_file_id, rel_path, bool(path_is_rel) if path_is_rel is not None else True,
+                record_count, row_id_start, partition_id, file_size, begin_snap,
+            ))
+
+        if len(eligible) < 2:
+            return -1
+
+        # Group eligible files by partition_id so we don't merge across partitions.
+        from collections import defaultdict
+        groups: dict[int | None, list] = defaultdict(list)
+        for f in eligible:
+            groups[f[5]].append(f)
+
+        merge_groups = [g for g in groups.values() if len(g) >= 2]
+        if not merge_groups:
+            return -1
+
+        # Per-group, build merged Arrow tables with the
+        # _ducklake_internal_snapshot_id column.
+        merged_groups: list[tuple[int | None, pa.Table, int, int, list[int]]] = []
+        for grp in merge_groups:
+            tables: list[pa.Table] = []
+            min_begin = min(f[7] for f in grp)
+            max_begin = max(f[7] for f in grp)
+            source_ids = [f[0] for f in grp]
+            for f in grp:
+                data_file_id, rel_path, path_is_rel, record_count, _rid, _pid, _sz, begin_snap = f
+                abs_path = self._resolve_file_path(
+                    rel_path, path_is_rel,
+                    table_path, table_path_rel, schema_path, schema_path_rel,
+                )
+                tbl = storage.read_parquet(abs_path)
+                # Strip any pre-existing internal snapshot column (defensive).
+                if "_ducklake_internal_snapshot_id" in tbl.column_names:
+                    tbl = tbl.drop(["_ducklake_internal_snapshot_id"])
+                # Tag every row with the source file's begin_snapshot
+                snap_col = pa.array(
+                    [begin_snap] * len(tbl), type=pa.int64()
+                )
+                tbl = tbl.append_column("_ducklake_internal_snapshot_id", snap_col)
+                tables.append(tbl)
+            merged = pa.concat_tables(tables, promote_options="permissive")
+            merged_groups.append((grp[0][5], merged, min_begin, max_begin, source_ids))
+
+        # Allocate snapshot + file ids
+        n_new_files = len(merged_groups)
+        new_next_file_id = next_file_id + n_new_files
+        new_snap = self._create_snapshot(schema_ver, next_cat_id, new_next_file_id)
+
+        base = self.data_path
+        if schema_path_rel:
+            base = storage.join_path(base, schema_path)
+        else:
+            base = schema_path
+        if table_path_rel:
+            base = storage.join_path(base, table_path)
+        else:
+            base = table_path
+        storage.makedirs(base, exist_ok=True)
+
+        # Per the C++ extension's WriteMergeAdjacent: source files are
+        # deleted entirely from ducklake_data_file (along with their stats,
+        # delete files, partition values, variant stats), and queued for
+        # physical removal in ducklake_files_scheduled_for_deletion.
+        # Without this deletion, time-travel reads would see BOTH the
+        # original and merged files in their overlapping snapshot range.
+        ph = self._backend.placeholder
+        all_source_ids: list[int] = [
+            sid for _, _, _, _, sids in merged_groups for sid in sids
+        ]
+        # Capture path info before we delete the rows so we can schedule them.
+        source_path_rows = con.execute(
+            f"SELECT data_file_id, path, path_is_relative "
+            f"FROM ducklake_data_file "
+            f"WHERE data_file_id IN ({','.join([ph] * len(all_source_ids))})",
+            all_source_ids,
+        ).fetchall()
+
+        for tbl in (
+            "ducklake_data_file",
+            "ducklake_file_column_stats",
+            "ducklake_delete_file",
+            "ducklake_file_partition_value",
+            "ducklake_file_variant_stats",
+        ):
+            try:
+                con.execute(
+                    f"DELETE FROM {tbl} "
+                    f"WHERE data_file_id IN ({','.join([ph] * len(all_source_ids))})",
+                    all_source_ids,
+                )
+            except Exception as e:
+                if not self._backend.is_table_not_found(e):
+                    raise
+
+        # Schedule the physical files for cleanup at the next vacuum.
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00")
+        for data_file_id, src_path, src_path_rel in source_path_rows:
+            con.execute(
+                "INSERT INTO ducklake_files_scheduled_for_deletion "
+                "(data_file_id, path, path_is_relative, schedule_start) "
+                "VALUES (?, ?, ?, ?)",
+                [data_file_id, src_path, bool(src_path_rel), now],
+            )
+
+        mapping_id = self._register_name_mapping(table_id, columns)
+
+        # The merged file's begin_snapshot must be the min source begin_snapshot
+        # so reads at older snapshots still see the data; partial_max records
+        # the highest snapshot present so readers know to filter rows.
+        current_file_id = next_file_id
+        for partition_id, merged_tbl, min_begin, max_begin, _src_ids in merged_groups:
+            file_name = f"ducklake-{_uuid7()}.parquet"
+            file_path = storage.join_path(base, file_name)
+            # Drop the internal column for stats but keep it in the written
+            # Parquet file (it is what readers use for partial_max filtering).
+            stamp = _stamp_field_ids(
+                merged_tbl.drop(["_ducklake_internal_snapshot_id"]),
+                columns,
+            )
+            # Reattach the internal column as the *last* column for storage.
+            stamp = stamp.append_column(
+                "_ducklake_internal_snapshot_id",
+                merged_tbl.column("_ducklake_internal_snapshot_id"),
+            )
+            storage.write_parquet(stamp, file_path)
+            file_size = storage.get_file_size(file_path)
+            footer_size = _read_parquet_footer_size(file_path)
+            record_count = len(merged_tbl)
+
+            # The merged file's begin_snapshot is overridden directly to the
+            # min source value; _register_data_file uses ``new_snap`` so we
+            # patch it after registration.
+            self._register_data_file(
+                current_file_id, table_id, new_snap, file_name,
+                record_count, file_size, footer_size, 0,
+                partition_id, mapping_id, partial_max=max_begin,
+            )
+            con.execute(
+                f"UPDATE ducklake_data_file SET begin_snapshot = {ph} "
+                f"WHERE data_file_id = {ph}",
+                [min_begin, current_file_id],
+            )
+            # Stats for the merged file (excluding internal column)
+            stats_table = merged_tbl.drop(["_ducklake_internal_snapshot_id"])
+            col_stats = self._compute_file_column_stats(stats_table, columns)
+            self._register_file_column_stats(current_file_id, table_id, col_stats)
+            current_file_id += 1
+
+        self._record_change(new_snap, f"compacted_table:{table_id}")
         self._commit_metadata()
         return new_snap
 
@@ -4838,11 +5671,22 @@ class DuckLakeCatalogWriter:
         self._commit_metadata()
 
     def vacuum(self) -> int:
-        """Delete orphaned Parquet files not referenced by any catalog entry."""
+        """Alias for :meth:`delete_orphaned_files` returning the count.
+
+        Kept for backwards compatibility. Mirrors
+        ``ducklake_delete_orphaned_files`` from the DuckDB extension.
+        """
+        return len(self.delete_orphaned_files())
+
+    def delete_orphaned_files(self, *, dry_run: bool = False) -> list[str]:
+        """Delete Parquet files in ``data_path`` not referenced by the catalog.
+
+        Mirrors ``ducklake_delete_orphaned_files``. Returns the list of file
+        paths that were (or would be, when ``dry_run=True``) deleted.
+        """
         con = self._connect()
 
         referenced: set[str] = set()
-
         data_base = self.data_path
 
         data_files = con.execute(
@@ -4877,14 +5721,129 @@ class DuckLakeCatalogWriter:
             )
             referenced.add(storage.normalize_path(abs_path))
 
-        deleted_count = 0
+        # Files queued for deletion (via merge_adjacent_files etc.) are NOT
+        # orphans — they are tracked. Skip them here; ``cleanup_old_files``
+        # is responsible for removing them when their schedule_start has aged
+        # past the threshold. The path stored is the (relative) path the
+        # original data_file row had; we cannot reliably reconstruct the
+        # full absolute path from just data_path because the original file
+        # was inside the table's path subdirectory. Use a basename-only
+        # heuristic — orphan detection is by exact path so we just register
+        # every scheduled basename as referenced.
+        try:
+            scheduled = con.execute(
+                "SELECT path, path_is_relative "
+                "FROM ducklake_files_scheduled_for_deletion"
+            ).fetchall()
+            for p, p_rel in scheduled:
+                if not p:
+                    continue
+                if p_rel and not os.path.isabs(p):
+                    # Match by basename across data_base
+                    for full_path in storage.list_directory(
+                        data_base, suffix=".parquet",
+                    ):
+                        if full_path.endswith(os.sep + p) or full_path.endswith("/" + p):
+                            referenced.add(storage.normalize_path(full_path))
+                else:
+                    referenced.add(storage.normalize_path(p))
+        except Exception as e:
+            if not self._backend.is_table_not_found(e):
+                raise
+
+        deleted: list[str] = []
         all_parquet_files = storage.list_directory(data_base, suffix=".parquet")
         for full_path in all_parquet_files:
             if storage.normalize_path(full_path) not in referenced:
-                storage.delete_file(full_path)
-                deleted_count += 1
+                if not dry_run:
+                    storage.delete_file(full_path)
+                deleted.append(full_path)
+        return deleted
 
-        return deleted_count
+    def cleanup_old_files(
+        self,
+        *,
+        older_than: "datetime | None" = None,
+        cleanup_all: bool = False,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Delete files queued in ``ducklake_files_scheduled_for_deletion``.
+
+        Mirrors ``ducklake_cleanup_old_files``. Removes the catalog entry
+        and the underlying file for each row whose ``schedule_start`` is
+        older than ``older_than`` (or all rows when ``cleanup_all=True``).
+        Returns the list of file paths processed.
+        """
+        if older_than is None and not cleanup_all:
+            raise ValueError(
+                "cleanup_old_files requires either older_than or cleanup_all=True"
+            )
+        con = self._connect()
+        ph = self._backend.placeholder
+
+        # ducklake_files_scheduled_for_deletion may not exist on pre-1.0
+        # bootstrapped catalogs, but our bootstrap creates it; guard anyway.
+        try:
+            if cleanup_all:
+                rows = con.execute(
+                    "SELECT data_file_id, path, path_is_relative "
+                    "FROM ducklake_files_scheduled_for_deletion"
+                ).fetchall()
+            else:
+                cutoff = older_than.strftime("%Y-%m-%d %H:%M:%S.%f+00")
+                rows = con.execute(
+                    f"SELECT data_file_id, path, path_is_relative "
+                    f"FROM ducklake_files_scheduled_for_deletion "
+                    f"WHERE schedule_start <= {ph}",
+                    [cutoff],
+                ).fetchall()
+        except Exception as e:
+            if self._backend.is_table_not_found(e):
+                return []
+            raise
+
+        deleted: list[str] = []
+        data_base = self.data_path
+        # Pre-build a basename → full path map for relative paths since the
+        # stored path is just the original ``ducklake_data_file.path`` (which
+        # may be a bare filename or include a partition subdir).
+        all_files = (
+            storage.list_directory(data_base, suffix=".parquet")
+            if any(p_rel for _, _, p_rel in rows) else []
+        )
+        for data_file_id, rel_path, path_is_rel in rows:
+            if not rel_path:
+                continue
+            if path_is_rel and not os.path.isabs(rel_path):
+                # Resolve by suffix-match across the data tree.
+                abs_path: str | None = None
+                for full_path in all_files:
+                    if (
+                        full_path.endswith(os.sep + rel_path)
+                        or full_path.endswith("/" + rel_path)
+                        or os.path.basename(full_path) == rel_path
+                    ):
+                        abs_path = full_path
+                        break
+                if abs_path is None:
+                    abs_path = storage.join_path(data_base, rel_path)
+            else:
+                abs_path = rel_path
+            if not dry_run:
+                try:
+                    storage.delete_file(abs_path)
+                except Exception:
+                    # Swallow — file may already be gone (e.g., manually removed)
+                    pass
+                con.execute(
+                    f"DELETE FROM ducklake_files_scheduled_for_deletion "
+                    f"WHERE data_file_id = {ph}",
+                    [data_file_id],
+                )
+            deleted.append(abs_path)
+        if not dry_run:
+            con.commit()
+        return deleted
 
     # ------------------------------------------------------------------
     # CREATE VIEW
@@ -5015,6 +5974,281 @@ class DuckLakeCatalogWriter:
 
         self._record_change(new_snap, f"dropped_view:{view_id}")
 
+        self._commit_metadata()
+
+    # ------------------------------------------------------------------
+    # MACROS
+    # ------------------------------------------------------------------
+
+    def _macro_exists(
+        self, macro_name: str, schema_name: str, snapshot_id: int
+    ) -> int | None:
+        """Return ``macro_id`` if a macro with that name is active, else None."""
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT m.macro_id FROM ducklake_macro m "
+                "JOIN ducklake_schema s ON m.schema_id = s.schema_id "
+                "WHERE m.macro_name = ? "
+                "  AND LOWER(s.schema_name) = LOWER(?) "
+                "  AND ? >= m.begin_snapshot "
+                "  AND (? < m.end_snapshot OR m.end_snapshot IS NULL) "
+                "  AND ? >= s.begin_snapshot "
+                "  AND (? < s.end_snapshot OR s.end_snapshot IS NULL)",
+                [macro_name, schema_name,
+                 snapshot_id, snapshot_id, snapshot_id, snapshot_id],
+            ).fetchone()
+        except Exception as exc:
+            if self._backend.is_table_not_found(exc):
+                return None
+            raise
+        return row[0] if row is not None else None
+
+    @_retryable
+    def create_macro(
+        self,
+        macro_name: str,
+        sql: str,
+        *,
+        macro_type: str = "scalar",
+        dialect: str = "duckdb",
+        parameters: list[dict[str, Any]] | None = None,
+        schema_name: str = "main",
+        or_replace: bool = False,
+    ) -> int:
+        """Create a macro / function in the catalog.
+
+        Parameters
+        ----------
+        macro_name
+            Name of the macro.
+        sql
+            Macro body. For DuckDB ``CREATE MACRO``, this is the body
+            expression (e.g., ``"a + b"``) or a ``SELECT`` statement for
+            table macros.
+        macro_type
+            ``"scalar"`` (default) or ``"table"``.
+        dialect
+            Dialect identifier (default ``"duckdb"``).
+        parameters
+            List of parameter dicts. Each dict supports keys
+            ``name`` (required), ``type`` (default ``"any"``),
+            ``default`` (literal default), and ``default_type``
+            (``"unknown"`` or ``"literal"``).
+        schema_name
+            Schema name (default ``"main"``).
+        or_replace
+            If True, overwrite any existing macro with the same name.
+
+        Returns
+        -------
+        int
+            The newly assigned ``macro_id``.
+        """
+        if macro_type not in {"scalar", "table"}:
+            raise ValueError(
+                f"macro_type must be 'scalar' or 'table', got {macro_type!r}"
+            )
+        con = self._connect()
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id, schema_ver, next_cat_id, next_file_id = -1, 0, 1, 1
+        else:
+            snap_id, schema_ver, next_cat_id, next_file_id = snapshot_info
+        self._start_write_transaction(snap_id)
+
+        existing = self._macro_exists(macro_name, schema_name, snap_id)
+        if existing is not None and not or_replace:
+            raise ValueError(
+                f"Macro '{schema_name}.{macro_name}' already exists"
+            )
+
+        schema_id, _schema_path, _schema_path_rel = self._resolve_schema_info(
+            schema_name, snap_id
+        )
+
+        macro_id = next_cat_id
+        new_next_cat_id = next_cat_id + 1
+        new_schema_ver = schema_ver + 1
+
+        new_snap = self._create_snapshot(new_schema_ver, new_next_cat_id, next_file_id)
+
+        if existing is not None:
+            con.execute(
+                "UPDATE ducklake_macro SET end_snapshot = ? "
+                "WHERE macro_id = ? AND end_snapshot IS NULL",
+                [new_snap, existing],
+            )
+
+        con.execute(
+            "INSERT INTO ducklake_macro "
+            "(schema_id, macro_id, macro_name, begin_snapshot, end_snapshot) "
+            "VALUES (?, ?, ?, ?, NULL)",
+            [schema_id, macro_id, macro_name, new_snap],
+        )
+        con.execute(
+            "INSERT INTO ducklake_macro_impl "
+            "(macro_id, impl_id, dialect, sql, type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [macro_id, 0, dialect, sql, macro_type],
+        )
+
+        # Persist parameters (if any)
+        from ducklake_core._schema import to_ducklake_type
+        for idx, param in enumerate(parameters or []):
+            name = param["name"]
+            # DuckDB's ducklake reader parses parameter types via
+            # DuckLakeTypes::FromString and rejects SQL aliases like
+            # "INTEGER" / "BIGINT" — canonicalize to "int32" / "int64".
+            ptype = to_ducklake_type(param.get("type", "unknown"))
+            default_val = param.get("default")
+            default_type = param.get(
+                "default_type",
+                "literal" if default_val is not None else "unknown",
+            )
+            con.execute(
+                "INSERT INTO ducklake_macro_parameters "
+                "(macro_id, impl_id, column_id, parameter_name, "
+                "parameter_type, default_value, default_value_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    macro_id, 0, idx, name, ptype,
+                    # DuckDB's ducklake reader calls StringValue::Get on
+                    # default_value and crashes on NULL — write the empty
+                    # string when there is no default (matches DuckDB's own
+                    # WriteNewMacros path).
+                    str(default_val) if default_val is not None else "",
+                    default_type,
+                ],
+            )
+
+        self._insert_schema_version(new_snap, new_schema_ver, None)
+
+        safe_schema = schema_name.replace('"', '""')
+        safe_macro = macro_name.replace('"', '""')
+        self._record_change(
+            new_snap, f'created_macro:"{safe_schema}"."{safe_macro}"'
+        )
+        self._commit_metadata()
+        return macro_id
+
+    @_retryable
+    def drop_macro(
+        self,
+        macro_name: str,
+        *,
+        schema_name: str = "main",
+    ) -> None:
+        """Drop a macro from the catalog."""
+        con = self._connect()
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id, schema_ver, next_cat_id, next_file_id = -1, 0, 1, 1
+        else:
+            snap_id, schema_ver, next_cat_id, next_file_id = snapshot_info
+        self._start_write_transaction(snap_id)
+
+        macro_id = self._macro_exists(macro_name, schema_name, snap_id)
+        if macro_id is None:
+            raise ValueError(
+                f"Macro '{schema_name}.{macro_name}' not found"
+            )
+
+        new_schema_ver = schema_ver + 1
+        new_snap = self._create_snapshot(new_schema_ver, next_cat_id, next_file_id)
+
+        con.execute(
+            "UPDATE ducklake_macro SET end_snapshot = ? "
+            "WHERE macro_id = ? AND end_snapshot IS NULL",
+            [new_snap, macro_id],
+        )
+
+        self._insert_schema_version(new_snap, new_schema_ver, None)
+        self._record_change(new_snap, f"dropped_macro:{macro_id}")
+        self._commit_metadata()
+
+    # ------------------------------------------------------------------
+    # set_option — scoped catalog settings (ducklake_metadata)
+    # ------------------------------------------------------------------
+
+    @_retryable
+    def set_option(
+        self,
+        key: str,
+        value: Any,
+        *,
+        schema: str | None = None,
+        table_name: str | None = None,
+    ) -> None:
+        """Set a scoped DuckLake configuration option.
+
+        Mirrors ``ducklake_set_option`` from the C++ extension. The
+        option is upserted into ``ducklake_metadata`` with one of three
+        scopes:
+
+        * ``scope IS NULL`` — catalog-wide (no ``schema`` / ``table_name``).
+        * ``scope = 'schema'`` — when ``schema`` is given without
+          ``table_name``; ``scope_id`` is the schema_id.
+        * ``scope = 'table'`` — when ``table_name`` is given;
+          ``scope_id`` is the table_id.
+        """
+        normalised_key = key.strip().lower()
+        validated_value = _validate_option_value(normalised_key, value)
+
+        con = self._connect()
+        snapshot_info = self._get_latest_snapshot()
+        if snapshot_info is None:
+            snap_id = -1
+        else:
+            snap_id = snapshot_info[0]
+        self._start_write_transaction(snap_id)
+
+        scope: str | None
+        scope_id: int | None
+        if table_name is not None:
+            schema_resolved = schema or "main"
+            tid = self._table_exists(table_name, schema_resolved, snap_id)
+            if tid is None:
+                raise TableNotFoundError(
+                    f"Table '{schema_resolved}.{table_name}' not found"
+                )
+            scope, scope_id = "table", tid
+        elif schema is not None:
+            sid, _, _ = self._resolve_schema_info(schema, snap_id)
+            scope, scope_id = "schema", sid
+        else:
+            scope, scope_id = None, None
+
+        if scope is None:
+            existing = con.execute(
+                "SELECT 1 FROM ducklake_metadata WHERE key = ? AND scope IS NULL",
+                [normalised_key],
+            ).fetchone()
+        else:
+            existing = con.execute(
+                "SELECT 1 FROM ducklake_metadata "
+                "WHERE key = ? AND scope = ? AND scope_id = ?",
+                [normalised_key, scope, scope_id],
+            ).fetchone()
+
+        if existing is None:
+            con.execute(
+                "INSERT INTO ducklake_metadata (key, value, scope, scope_id) "
+                "VALUES (?, ?, ?, ?)",
+                [normalised_key, validated_value, scope, scope_id],
+            )
+        elif scope is None:
+            con.execute(
+                "UPDATE ducklake_metadata SET value = ? "
+                "WHERE key = ? AND scope IS NULL",
+                [validated_value, normalised_key],
+            )
+        else:
+            con.execute(
+                "UPDATE ducklake_metadata SET value = ? "
+                "WHERE key = ? AND scope = ? AND scope_id = ?",
+                [validated_value, normalised_key, scope, scope_id],
+            )
         self._commit_metadata()
 
     # ------------------------------------------------------------------

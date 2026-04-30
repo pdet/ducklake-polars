@@ -306,7 +306,7 @@ class DuckLakeCatalogWriter:
     def set_partitioned_by(
         self,
         table_name: str,
-        column_names: list[str],
+        column_names: list[str | tuple[str, str]],
         *,
         schema_name: str = "main",
     ) -> None:

@@ -227,7 +227,10 @@ class DuckLakeCatalogWriter:
         on: str | list[str],
         *,
         when_matched_update: dict[str, Any] | bool | None = None,
+        when_matched_delete: bool = False,
         when_not_matched_insert: bool = True,
+        when_not_matched_by_source_delete: bool = False,
+        when_not_matched_by_source_update: dict[str, Any] | None = None,
         schema_name: str = "main",
     ) -> tuple[int, int]:
         return self._core.merge_data(
@@ -235,7 +238,14 @@ class DuckLakeCatalogWriter:
             table_name,
             on,
             when_matched_update=_convert_matched_update(when_matched_update),
+            when_matched_delete=when_matched_delete,
             when_not_matched_insert=when_not_matched_insert,
+            when_not_matched_by_source_delete=(
+                when_not_matched_by_source_delete
+            ),
+            when_not_matched_by_source_update=_convert_matched_update(
+                when_not_matched_by_source_update
+            ),
             schema_name=schema_name,
         )
 

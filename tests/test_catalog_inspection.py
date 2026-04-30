@@ -78,7 +78,7 @@ class TestListSnapshots:
 class TestCatalogInfo:
     def test_catalog_info(self, catalog):
         info = ducklake_polars.catalog_info(catalog)
-        assert info["version"] in ("0.3", "0.4")
+        assert info["version"] in ("0.3", "0.4", "1.0")
         assert info["table_count"] == 2
         assert info["snapshot_count"] > 0
         assert "data_path" in info

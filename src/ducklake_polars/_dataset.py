@@ -40,6 +40,38 @@ def _safe_unlink(path: str) -> None:
         pass
 
 
+def _filter_partial_data_file(
+    path: str, snapshot_id: int, *, drop_internal: bool = True,
+) -> str:
+    """Filter a partial data file by ``_ducklake_internal_snapshot_id``.
+
+    Returns the path to a filtered temp file. The internal snapshot column
+    is dropped before returning so callers can scan the file with the
+    catalog schema. If the input file lacks the internal column, the
+    original *path* is returned unchanged.
+    """
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    tbl = storage.read_parquet(path)
+    if "_ducklake_internal_snapshot_id" not in tbl.column_names:
+        return path
+
+    mask = pc.less_equal(
+        tbl.column("_ducklake_internal_snapshot_id"), snapshot_id
+    )
+    filtered = tbl.filter(mask)
+    if drop_internal:
+        keep = [c for c in filtered.column_names if c != "_ducklake_internal_snapshot_id"]
+        filtered = filtered.select(keep)
+
+    fd, tmp_path = tempfile.mkstemp(suffix="-partial-data.parquet")
+    os.close(fd)
+    atexit.register(lambda p=tmp_path: _safe_unlink(p))
+    pq.write_table(filtered, tmp_path)
+    return tmp_path
+
+
 def _filter_delete_file_by_snapshot(path: str, snapshot_id: int) -> str | None:
     """Filter a cumulative delete file to only include entries up to *snapshot_id*.
 
@@ -95,6 +127,12 @@ def _cast_inlined_to_schema(
     casts each column to the expected Polars type so the temp Parquet file
     matches the dataset schema reported by ``schema()``.
     """
+    def _is(target: object, polars_cls: type) -> bool:
+        # Schema entries can be either a Polars type class (e.g. ``pl.Boolean``)
+        # or an instance of one (e.g. ``pl.Boolean()``); ``isinstance`` only
+        # matches the latter, so check both shapes.
+        return target == polars_cls or isinstance(target, polars_cls)
+
     cast_exprs: list[pl.Expr] = []
     for col_name in df.columns:
         if col_name not in schema:
@@ -104,9 +142,9 @@ def _cast_inlined_to_schema(
         current = df[col_name].dtype
         if current == target:
             cast_exprs.append(pl.col(col_name))
-        elif isinstance(target, pl.Boolean) and current in (pl.Int64, pl.Int32, pl.Int8):
+        elif _is(target, pl.Boolean) and current in (pl.Int64, pl.Int32, pl.Int8):
             cast_exprs.append(pl.col(col_name).cast(pl.Boolean))
-        elif isinstance(target, pl.Datetime):
+        elif _is(target, pl.Datetime):
             if current in (pl.String, pl.Utf8):
                 # SQLite stores timestamps as strings — parse them
                 cast_exprs.append(
@@ -115,9 +153,9 @@ def _cast_inlined_to_schema(
             else:
                 # DuckDB writes all timestamps as microseconds in Parquet
                 cast_exprs.append(pl.col(col_name).cast(pl.Datetime("us")))
-        elif isinstance(target, pl.Date) and current in (pl.String, pl.Utf8):
+        elif _is(target, pl.Date) and current in (pl.String, pl.Utf8):
             cast_exprs.append(pl.col(col_name).str.to_date(strict=False))
-        elif isinstance(target, pl.Time) and current in (pl.String, pl.Utf8):
+        elif _is(target, pl.Time) and current in (pl.String, pl.Utf8):
             cast_exprs.append(pl.col(col_name).str.to_time(strict=False))
         else:
             try:
@@ -690,11 +728,23 @@ class DuckLakeDataset:
         catalog.
         """
         reader = self._get_reader()
-        snapshot = self._resolve_snapshot(reader)
-        # Combined query: table + columns in one roundtrip
-        table, all_columns = reader.get_table_with_columns(
-            self.table_name, self.schema_name, snapshot.snapshot_id
-        )
+        try:
+            snapshot = self._resolve_snapshot(reader)
+            # Combined query: table + columns in one roundtrip
+            table, all_columns = reader.get_table_with_columns(
+                self.table_name, self.schema_name, snapshot.snapshot_id
+            )
+        except BaseException:
+            # If schema resolution fails (e.g. table missing at the requested
+            # snapshot), release the reader so its sqlite connection doesn't
+            # linger and block subsequent writers on the same process. Also
+            # clear any cached metadata so a later to_dataset_scan() can't
+            # consume stale state from a previous successful schema() call.
+            self._close_reader()
+            self._cached_snapshot = None
+            self._cached_table = None
+            self._cached_all_columns = None
+            raise
         # Cache for reuse in to_dataset_scan()
         self._cached_snapshot = snapshot
         self._cached_table = table
@@ -864,11 +914,22 @@ class DuckLakeDataset:
                     if not reader._backend.is_table_not_found(e):
                         raise
 
-            # Resolve file paths once for reuse
-            resolved_paths: dict[int, str] = {
-                f.data_file_id: reader.resolve_data_file_path(f.path, f.path_is_relative, table)
-                for f in data_files
-            }
+            # Resolve file paths once for reuse. Files marked as partial (i.e.,
+            # those merged via merge_adjacent_files and tagged with a non-NULL
+            # ``partial_max``) are pre-filtered to a temp Parquet to:
+            # 1. Strip rows whose ``_ducklake_internal_snapshot_id`` is greater
+            #    than the snapshot we are reading, and
+            # 2. Drop the internal column so the file matches the catalog schema.
+            resolved_paths: dict[int, str] = {}
+            for f in data_files:
+                abs_path = reader.resolve_data_file_path(
+                    f.path, f.path_is_relative, table,
+                )
+                if f.partial_max is not None:
+                    abs_path = _filter_partial_data_file(
+                        abs_path, snapshot.snapshot_id,
+                    )
+                resolved_paths[f.data_file_id] = abs_path
 
             # Detect column renames and struct field renames.
             # Fast path: if no column has ever been dropped/renamed
@@ -1063,8 +1124,15 @@ class DuckLakeDataset:
             if inlined is not None and not inlined.is_empty():
                 schema_dict = self._build_schema_from_columns(all_columns)
                 inlined = _cast_inlined_to_schema(inlined, schema_dict)
+                # The Parquet side may have been written with a wider int type
+                # (e.g. ``active`` written by older flushers as Int64 when the
+                # catalog declares Boolean). Force-cast both sides to the
+                # catalog schema before concat so ``diagonal_relaxed`` doesn't
+                # need to negotiate type promotion across Boolean/Int64.
+                parquet_df = lf.collect()
+                parquet_df = _cast_inlined_to_schema(parquet_df, schema_dict)
                 combined = pl.concat(
-                    [lf.collect(), inlined], how="diagonal_relaxed"
+                    [parquet_df, inlined], how="diagonal_relaxed"
                 )
                 fd, tmp_path = tempfile.mkstemp(suffix=".parquet")
                 os.close(fd)

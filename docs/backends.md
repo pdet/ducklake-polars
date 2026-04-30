@@ -32,6 +32,10 @@ sqlite3 catalog.ducklake ".tables"
 - **Development and testing** — catalogs are just files, easy to copy/delete
 - **DuckDB interop** — DuckDB's native DuckLake extension reads the same SQLite files
 
+### WAL mode
+
+ducklake-dataframe automatically flips SQLite catalogs to **WAL (Write-Ahead Log)** mode on the first write. This persistent setting allows readers to proceed concurrently with one writer — without it, a reader colliding with an in-flight write transaction can surface as a "disk I/O error" on macOS. The mode is captured in the file header, so all subsequent opens (including from DuckDB's native extension) inherit it. WAL creates `.ducklake-wal` and `.ducklake-shm` sidecar files next to the catalog; they are part of the database and should be kept together.
+
 ## PostgreSQL
 
 PostgreSQL provides a shared, network-accessible catalog backend suitable for team environments.
@@ -119,18 +123,18 @@ And vice versa — create with ducklake-dataframe, query with DuckDB SQL.
 
 ### Catalog format versions
 
-Both DuckLake catalog format **v0.3** and **v0.4** are supported. The format version is detected automatically from the catalog metadata.
+DuckLake catalog format **v1.0** is the default for new catalogs. Older **v0.3** / **v0.4** catalogs (e.g., those created by older DuckDB-ducklake versions) are read-compatible, but **migration is opt-in** — call `migrate_catalog(path)` (re-exported from `ducklake_polars`, `ducklake_pandas`, and `ducklake_pyspark`) to bring a v0.3 or v0.4 catalog up to v1.0 in place. The function is idempotent. v1.0-only writer features (`merge_adjacent_files`, macros, expression sort keys, expression defaults, custom column tag keys) raise an explicit version error against pre-1.0 catalogs.
 
 ## Backend comparison
 
 | Feature | SQLite | PostgreSQL | DuckDB |
 |---|---|---|---|
 | Dependencies | None (stdlib) | `psycopg2` | `sqlite3` (stdlib) |
-| Shared access | Single process | Multi-user | Single process |
+| Shared access | Single writer + concurrent readers (WAL) | Multi-user, MVCC | Single process |
 | Network access | Local file only | TCP/IP | Local file only |
 | Setup | Zero config | Database server | Zero config |
 | DuckDB interop | ✅ | ✅ | ✅ |
-| Catalog format | v0.3, v0.4 | v0.3, v0.4 | v0.3, v0.4 |
+| Catalog format | v0.3, v0.4, v1.0 | v0.3, v0.4, v1.0 | v0.3, v0.4, v1.0 |
 
 ## Data path override
 

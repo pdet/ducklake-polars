@@ -335,10 +335,16 @@ class DuckLakeCatalog:
         Returns a table with columns:
         - ``key`` (string)
         - ``value`` (string)
+        - ``scope`` (string or null) — ``"schema"`` / ``"table"`` for
+          scoped options, ``null`` for catalog-wide rows.
+        - ``scope_id`` (int64 or null) — schema_id / table_id for the
+          scoped row; ``null`` otherwise.
         """
         opt_schema = pa.schema([
             pa.field("key", pa.string()),
             pa.field("value", pa.string()),
+            pa.field("scope", pa.string()),
+            pa.field("scope_id", pa.int64()),
         ])
 
         with self._reader() as reader:
@@ -347,10 +353,18 @@ class DuckLakeCatalog:
         if not rows:
             return opt_schema.empty_table()
 
+        # Older readers may yield 2-tuples; normalise.
+        norm = [r if len(r) == 4 else (r[0], r[1], None, None) for r in rows]
+
         return pa.table(
             {
-                "key": pa.array([r[0] for r in rows], type=pa.string()),
-                "value": pa.array([r[1] for r in rows], type=pa.string()),
+                "key": pa.array([r[0] for r in norm], type=pa.string()),
+                "value": pa.array([r[1] for r in norm], type=pa.string()),
+                "scope": pa.array([r[2] for r in norm], type=pa.string()),
+                "scope_id": pa.array(
+                    [r[3] if r[3] is None else int(r[3]) for r in norm],
+                    type=pa.int64(),
+                ),
             },
             schema=opt_schema,
         )
@@ -896,38 +910,65 @@ class DuckLakeCatalog:
 
         Returns an empty table if no sort keys are set.
         """
-        reader = self._reader()
-        snap = reader._resolve_snapshot(snapshot_version)
-        table_id = reader._resolve_table_id(table, schema, snap.snapshot_id)
+        sk_schema = pa.schema([
+            pa.field("sort_key_index", pa.int64()),
+            pa.field("expression", pa.string()),
+            pa.field("sort_direction", pa.string()),
+            pa.field("null_order", pa.string()),
+        ])
 
-        from ducklake_core._writer import DuckLakeWriter
-        writer = DuckLakeWriter.__new__(DuckLakeWriter)
-        writer._backend = reader._backend
+        with self._reader() as reader:
+            if snapshot_version is not None:
+                snap = reader.get_snapshot_at_version(snapshot_version)
+            else:
+                snap = reader.get_current_snapshot()
+            table_info = reader.get_table(table, schema, snap.snapshot_id)
+            con = reader._connect()
+            try:
+                row = con.execute(
+                    reader._sql(
+                        "SELECT sort_id FROM ducklake_sort_info "
+                        "WHERE table_id = ? AND begin_snapshot <= ? "
+                        "AND (end_snapshot IS NULL OR end_snapshot > ?)"
+                    ),
+                    [table_info.table_id, snap.snapshot_id, snap.snapshot_id],
+                ).fetchone()
+            except Exception as exc:
+                if reader._backend.is_table_not_found(exc):
+                    return sk_schema.empty_table()
+                raise
+            if row is None:
+                return sk_schema.empty_table()
+            sort_id = row[0]
+            rows = con.execute(
+                reader._sql(
+                    "SELECT sort_key_index, expression, sort_direction, "
+                    "null_order FROM ducklake_sort_expression "
+                    "WHERE sort_id = ? AND table_id = ? "
+                    "ORDER BY sort_key_index"
+                ),
+                [sort_id, table_info.table_id],
+            ).fetchall()
 
-        writer._ensure_sort_tables()
+        if not rows:
+            return sk_schema.empty_table()
 
-        keys = writer._get_active_sort_keys(table_id, snap.snapshot_id)
-        if keys is None:
-            return pa.table({
-                "sort_key_index": pa.array([], type=pa.int64()),
-                "expression": pa.array([], type=pa.string()),
-                "sort_direction": pa.array([], type=pa.string()),
-                "null_order": pa.array([], type=pa.string()),
-            })
-
-        indices = []
-        expressions = []
-        directions = []
-        null_orders = []
-        for i, (col_name, direction, null_order) in enumerate(keys):
-            indices.append(i)
-            expressions.append(col_name)
-            directions.append(direction)
-            null_orders.append(null_order)
-
-        return pa.table({
-            "sort_key_index": pa.array(indices, type=pa.int64()),
-            "expression": pa.array(expressions, type=pa.string()),
-            "sort_direction": pa.array(directions, type=pa.string()),
-            "null_order": pa.array(null_orders, type=pa.string()),
-        })
+        return pa.table(
+            {
+                "sort_key_index": pa.array(
+                    [r[0] for r in rows], type=pa.int64(),
+                ),
+                "expression": pa.array(
+                    [r[1] for r in rows], type=pa.string(),
+                ),
+                "sort_direction": pa.array(
+                    [(r[2] or "ASC").upper() for r in rows],
+                    type=pa.string(),
+                ),
+                "null_order": pa.array(
+                    [(r[3] or "NULLS_LAST").upper() for r in rows],
+                    type=pa.string(),
+                ),
+            },
+            schema=sk_schema,
+        )

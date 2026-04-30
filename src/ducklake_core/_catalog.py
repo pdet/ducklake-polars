@@ -12,7 +12,7 @@ from ducklake_core._exceptions import CatalogVersionError, SchemaNotFoundError, 
 
 import pyarrow as pa
 
-SUPPORTED_DUCKLAKE_VERSIONS = {"0.3", "0.4"}
+SUPPORTED_DUCKLAKE_VERSIONS = {"0.3", "0.4", "1.0"}
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -31,6 +31,7 @@ class FileInfo:
     partition_id: int | None
     mapping_id: int | None
     begin_snapshot: int = 0
+    partial_max: int | None = None
 
 
 @dataclass
@@ -55,6 +56,9 @@ class ColumnInfo:
     column_order: int
     parent_column: int | None
     nulls_allowed: bool
+    default_value: str | None = None
+    default_value_type: str | None = None  # 'literal' or 'expression'
+    default_value_dialect: str | None = None  # e.g. 'duckdb' for expressions
 
 
 @dataclass
@@ -195,9 +199,11 @@ class DuckLakeCatalogReader:
         metadata_path: str,
         *,
         data_path_override: str | None = None,
+        automatic_migration: bool = False,
     ) -> None:
         self._backend = create_backend(metadata_path)
         self._data_path_override = data_path_override
+        self._automatic_migration = automatic_migration
         self._con: Any = None
         self._data_path: str | None = None
         self._catalog_version: str | None = None
@@ -213,22 +219,64 @@ class DuckLakeCatalogReader:
     def _load_metadata(self) -> None:
         """Load version and data_path from ducklake_metadata in a single query."""
         rows = self._con.execute(
-            "SELECT key, value FROM ducklake_metadata WHERE key IN ('version', 'data_path')"
+            "SELECT key, value FROM ducklake_metadata "
+            "WHERE key IN ('version', 'data_path', 'encrypted')"
         ).fetchall()
         meta = {r[0]: r[1] for r in rows}
+        if meta.get("encrypted", "false").lower() == "true":
+            raise NotImplementedError(
+                "ducklake-dataframe does not yet support reading encrypted "
+                "DuckLake catalogs. Use the DuckDB ducklake extension for "
+                "encrypted catalogs."
+            )
         version = meta.get("version")
         if version is None:
             msg = "No version found in ducklake_metadata — is this a valid DuckLake catalog?"
             raise CatalogVersionError(msg)
         if version not in SUPPORTED_DUCKLAKE_VERSIONS:
-            msg = (
-                f"Unsupported DuckLake catalog version '{version}'. "
-                f"Supported versions: {', '.join(sorted(SUPPORTED_DUCKLAKE_VERSIONS))}"
-            )
-            raise CatalogVersionError(msg)
+            if self._automatic_migration:
+                version = self._migrate_to_latest(version)
+                meta["version"] = version
+            else:
+                msg = (
+                    f"Unsupported DuckLake catalog version '{version}'. "
+                    f"Supported versions: {', '.join(sorted(SUPPORTED_DUCKLAKE_VERSIONS))}"
+                )
+                raise CatalogVersionError(msg)
+        elif self._automatic_migration and version != "1.0":
+            # Up-migrate older-but-supported catalogs to 1.0 when requested.
+            version = self._migrate_to_latest(version)
+            meta["version"] = version
         self._catalog_version = version
         if self._data_path_override is None and "data_path" in meta:
             self._data_path = meta["data_path"]
+
+    def _migrate_to_latest(self, current_version: str) -> str:
+        """Run migrations to bring the catalog up to 1.0 in-place.
+
+        Opens a writable connection (separate from the read-only one used
+        by this reader), applies the migration SQL, commits, and closes
+        the writable connection. The read-only connection is then refreshed
+        by the caller via re-querying ``ducklake_metadata``.
+        """
+        from ducklake_core._migration import migrate_to_latest
+
+        backend_kind = "sqlite" if self._backend.placeholder == "?" else "postgres"
+        write_con = self._backend.connect_writable()
+        try:
+            new_version = migrate_to_latest(
+                write_con, current_version=current_version, backend=backend_kind,
+            )
+            write_con.commit()
+            return new_version
+        except Exception:
+            try:
+                write_con.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            write_con.close()
 
     def _sql(self, query: str) -> str:
         """Translate ``?`` placeholders to the backend's parameter style.
@@ -671,35 +719,97 @@ class DuckLakeCatalogReader:
         if cache_key in self._cache:
             return self._cache[cache_key]
         con = self._connect()
-        rows = con.execute(
-            self._sql("""
-            SELECT column_id, column_name, column_type, column_order,
-                   parent_column, nulls_allowed
-            FROM ducklake_column
-            WHERE table_id = ?
-              AND ? >= begin_snapshot
-              AND (? < end_snapshot OR end_snapshot IS NULL)
-            ORDER BY column_order
-            """),
-            [table_id, snapshot_id, snapshot_id],
-        ).fetchall()
-        result = [
-            ColumnInfo(
-                column_id=r[0],
-                column_name=r[1],
-                column_type=r[2],
-                column_order=r[3],
-                parent_column=r[4],
-                nulls_allowed=bool(r[5]) if r[5] is not None else True,
-            )
-            for r in rows
-        ]
+        # default_value_type / default_value_dialect were added in v0.4.
+        if self._catalog_version is not None and self._catalog_version >= "0.4":
+            rows = con.execute(
+                self._sql("""
+                SELECT column_id, column_name, column_type, column_order,
+                       parent_column, nulls_allowed, default_value,
+                       default_value_type, default_value_dialect
+                FROM ducklake_column
+                WHERE table_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                ORDER BY column_order
+                """),
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchall()
+            result = [
+                ColumnInfo(
+                    column_id=r[0],
+                    column_name=r[1],
+                    column_type=r[2],
+                    column_order=r[3],
+                    parent_column=r[4],
+                    nulls_allowed=bool(r[5]) if r[5] is not None else True,
+                    default_value=r[6],
+                    default_value_type=r[7],
+                    default_value_dialect=r[8],
+                )
+                for r in rows
+            ]
+        else:
+            rows = con.execute(
+                self._sql("""
+                SELECT column_id, column_name, column_type, column_order,
+                       parent_column, nulls_allowed, default_value
+                FROM ducklake_column
+                WHERE table_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                ORDER BY column_order
+                """),
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchall()
+            result = [
+                ColumnInfo(
+                    column_id=r[0],
+                    column_name=r[1],
+                    column_type=r[2],
+                    column_order=r[3],
+                    parent_column=r[4],
+                    nulls_allowed=bool(r[5]) if r[5] is not None else True,
+                    default_value=r[6],
+                    default_value_type=("literal" if r[6] is not None else None),
+                    default_value_dialect=None,
+                )
+                for r in rows
+            ]
         self._cache[cache_key] = result
         return result
 
     def get_data_files(self, table_id: int, snapshot_id: int) -> list[FileInfo]:
         """Get data files for a table at a specific snapshot."""
         con = self._connect()
+        if self._catalog_version is not None and self._catalog_version >= "0.4":
+            rows = con.execute(
+                self._sql("""
+                SELECT data_file_id, path, path_is_relative, record_count,
+                       file_size_bytes, row_id_start, partition_id, mapping_id,
+                       begin_snapshot, partial_max
+                FROM ducklake_data_file
+                WHERE table_id = ?
+                  AND ? >= begin_snapshot
+                  AND (? < end_snapshot OR end_snapshot IS NULL)
+                ORDER BY file_order, data_file_id
+                """),
+                [table_id, snapshot_id, snapshot_id],
+            ).fetchall()
+            return [
+                FileInfo(
+                    data_file_id=r[0],
+                    path=r[1],
+                    path_is_relative=bool(r[2]) if r[2] is not None else True,
+                    record_count=r[3],
+                    file_size_bytes=r[4],
+                    row_id_start=r[5],
+                    partition_id=r[6],
+                    mapping_id=r[7],
+                    begin_snapshot=r[8],
+                    partial_max=r[9],
+                )
+                for r in rows
+            ]
         rows = con.execute(
             self._sql("""
             SELECT data_file_id, path, path_is_relative, record_count,
@@ -1090,10 +1200,14 @@ class DuckLakeCatalogReader:
         ).fetchall()
 
     def get_all_metadata(self) -> list[tuple]:
-        """Get all key-value pairs from ducklake_metadata."""
+        """Get all rows from ``ducklake_metadata``.
+
+        Returns ``(key, value, scope, scope_id)`` tuples — ``scope`` is
+        ``None`` for catalog-wide options.
+        """
         con = self._connect()
         return con.execute(
-            "SELECT key, value FROM ducklake_metadata"
+            "SELECT key, value, scope, scope_id FROM ducklake_metadata"
         ).fetchall()
 
     def get_data_files_in_range_with_snapshot(self, table_id: int, start_snapshot: int, end_snapshot: int) -> list[tuple[FileInfo, int]]:

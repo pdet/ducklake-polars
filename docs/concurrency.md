@@ -73,9 +73,11 @@ With these settings, the retry sequence would be:
 
 ### SQLite
 
-SQLite uses file-level locking. Concurrent writes from the same process are serialized by Python's GIL and SQLite's internal locking. Concurrent writes from different processes use SQLite's filesystem locking — one writer proceeds while others wait or get a "database is locked" error.
+SQLite catalogs are auto-flipped to **WAL (Write-Ahead Log) mode** on the first write. WAL allows concurrent readers to proceed alongside one writer without colliding (a regular rollback-journal database surfaces "disk I/O error" when a reader and writer race). The mode is persisted in the file header — once flipped, all future opens inherit it.
 
-For single-writer scenarios (the most common case), SQLite works without issues.
+Single-writer concurrency model: one writer at a time, many concurrent readers. Concurrent writes from different processes are serialised by SQLite's filesystem locking — the second writer waits for the timeout (30s by default) or gets a "database is locked" error. The OCC retry layer above this handles that gracefully.
+
+For single-writer-per-process workloads (the most common case), SQLite works without issues.
 
 ### PostgreSQL
 
@@ -145,11 +147,27 @@ write_ducklake(
 
 These are stored in the snapshot metadata and can be inspected via the catalog API.
 
+## Optimistic concurrency control
+
+ducklake-dataframe implements OCC at the snapshot-commit boundary. Each writer:
+
+1. Reads the latest snapshot (`max(snapshot_id)`).
+2. Stages new files / DDL changes locally.
+3. On commit, attempts to insert the next snapshot row inside an exclusive (`BEGIN IMMEDIATE` on SQLite, default isolation on PostgreSQL) transaction.
+4. If a concurrent writer already claimed that snapshot id, validates the staged work against the new state and retries; otherwise raises `TransactionConflictError`.
+
+Conflicts are detected at three granularities:
+
+- **Table-level** — concurrent DDL on the same table (drop, rename, schema changes)
+- **File-level** — concurrent writes touching the same data files (e.g., delete vs compact)
+- **Partition-level** — concurrent writes to the same identity-transform partition values
+
+The retry layer is the public-facing API (`max_retries=`, `retry_wait_ms=`, `retry_backoff=`). Inside the writer, snapshot-id INSERT races have their own bounded retry (`max_snapshot_retries=5`, `snapshot_retry_wait_ms=50`) to handle the narrow window where two writers picked the same `snapshot_id` simultaneously.
+
 ## Known limitations
 
-- **No optimistic concurrency control** — ducklake-dataframe does not implement full OCC with conflict resolution. The retry mechanism re-reads and re-applies the entire operation.
 - **No merge conflict resolution** — if two writers modify the same rows, the last writer wins (after retry). There is no automatic three-way merge.
-- **SQLite concurrent writes** — SQLite's file-level locking means only one writer can proceed at a time. For true concurrent writes, use PostgreSQL.
+- **SQLite single-writer** — SQLite serialises writes via filesystem locking. Reads are concurrent (WAL), but only one writer makes progress at a time. For multi-writer pipelines, use PostgreSQL.
 - **No distributed locking** — there is no external lock manager. Coordination relies entirely on the catalog backend's native transaction support.
 
 For production workloads requiring concurrent writes, PostgreSQL is strongly recommended as the catalog backend.

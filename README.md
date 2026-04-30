@@ -28,7 +28,7 @@ DuckLake's SQL-database-backed catalog (SQLite or PostgreSQL) turns operations t
 <details>
 <summary>Full benchmark details and methodology</summary>
 
-**Hardware:** ARM64, 4 cores, 7.6 GiB RAM · **Software:** Python 3.11, Polars 1.38.1, PyArrow 23.0.1, DuckDB 1.4.4, PyIceberg 0.11.1, ducklake-dataframe v0.4.0
+**Hardware:** ARM64, 4 cores, 7.6 GiB RAM · **Software:** Python 3.11, Polars 1.38.1, PyArrow 23.0.1, DuckDB 1.5.2, PyIceberg 0.11.1, ducklake-dataframe v0.4.0
 
 **Streaming benchmark** (100 batches × 1K rows):
 
@@ -162,7 +162,33 @@ print(result)
 # └─────┴───────┘
 ```
 
-### 3. Evolve the schema
+### 3. Delete, update, merge
+
+```python
+from ducklake_polars import delete_ducklake, update_ducklake, merge_ducklake
+
+# Delete rows
+deleted = delete_ducklake("catalog.ducklake", "users", pl.col("id") == 2)
+
+# Update rows
+updated = update_ducklake(
+    "catalog.ducklake", "users",
+    updates={"region": "APAC"},
+    predicate=pl.col("name") == "Eve",
+)
+
+# Merge (upsert) — atomic delete + insert in one snapshot.
+# The source DataFrame must include every column of the target table; pass NULL
+# for columns you don't want to set on inserted rows.
+source = pl.DataFrame({"id": [1, 6], "name": ["Alice2", "Frank"], "region": ["US", "EU"]})
+rows_updated, rows_inserted = merge_ducklake(
+    "catalog.ducklake", "users", source, on="id",
+    when_matched_update=True,
+    when_not_matched_insert=True,
+)
+```
+
+### 4. Evolve the schema
 
 ```python
 from ducklake_polars import (
@@ -181,39 +207,17 @@ alter_ducklake_rename_column("catalog.ducklake", "users", "email", "contact")
 alter_ducklake_set_type("catalog.ducklake", "users", "id", "BIGINT")
 ```
 
-### 4. Delete, update, merge
-
-```python
-from ducklake_polars import delete_ducklake, update_ducklake, merge_ducklake
-
-# Delete rows
-deleted = delete_ducklake("catalog.ducklake", "users", pl.col("id") == 2)
-
-# Update rows
-updated = update_ducklake(
-    "catalog.ducklake", "users",
-    updates={"region": "APAC"},
-    predicate=pl.col("name") == "Eve",
-)
-
-# Merge (upsert) — atomic delete + insert in one snapshot
-source = pl.DataFrame({"id": [1, 6], "name": ["Alice2", "Frank"], "region": ["US", "EU"]})
-rows_updated, rows_inserted = merge_ducklake(
-    "catalog.ducklake", "users", source, on="id",
-    when_matched_update=True,
-    when_not_matched_insert=True,
-)
-```
-
 ### 5. Time travel
 
 ```python
-from ducklake_polars import read_ducklake
+from ducklake_polars import read_ducklake, DuckLakeCatalog
 
-# Read at a specific snapshot version
-df_v1 = read_ducklake("catalog.ducklake", "users", snapshot_version=1)
+# Read at a specific snapshot — pick the snapshot id from the catalog
+catalog = DuckLakeCatalog("catalog.ducklake")
+first_data_snapshot = int(catalog.snapshots()["snapshot_id"].sort()[1])  # skip the bootstrap snapshot
+df_at_first = read_ducklake("catalog.ducklake", "users", snapshot_version=first_data_snapshot)
 
-# Read at a specific timestamp
+# Or read at a specific timestamp
 df_ts = read_ducklake("catalog.ducklake", "users", snapshot_time="2025-06-15T10:30:00")
 ```
 
@@ -264,7 +268,7 @@ The reverse also works: write with ducklake-dataframe, query with DuckDB SQL.
 |---|---|
 | `scan_ducklake(path, table, ...)` | Polars-only. Returns a `LazyFrame` with full predicate/projection pushdown and file pruning. |
 | `read_ducklake(path, table, ...)` | Eager read into `DataFrame` (Polars/PySpark) or `pd.DataFrame` (Pandas). Supports `columns=` for projection. |
-| `read_ducklake_changes(path, table, ...)` | CDC: read insertions and deletions between two snapshot versions. Returns rows with `change_type` column. |
+| `read_ducklake_changes(path, table, ...)` | CDC: read insertions and deletions between two snapshot versions. Returns rows with `change_type` column. Polars/Pandas use `start_version`/`end_version`; PySpark uses `start_snapshot`/`end_snapshot`. |
 
 All read functions support `snapshot_version=`, `snapshot_time=`, `schema=`, and `data_path=` overrides.
 
@@ -311,7 +315,7 @@ All write operations support `author=` and `commit_message=` for snapshot metada
 ### Catalog inspection
 
 ```python
-from ducklake_polars import DuckLakeCatalog  # or ducklake_pandas
+from ducklake_polars import DuckLakeCatalog  # or ducklake_pandas (not available in ducklake_pyspark)
 
 catalog = DuckLakeCatalog("catalog.ducklake")
 ```
@@ -386,9 +390,22 @@ except TransactionConflictError as e:
     # Re-read, resolve, retry
 ```
 
+## Catalog migration (v0.3 / v0.4 → v1.0)
+
+Older catalogs created by earlier DuckDB-ducklake builds can be brought up to v1.0 in place. Migration is opt-in (we don't auto-migrate on read or write) and idempotent:
+
+```python
+from ducklake_polars import migrate_catalog  # also re-exported from ducklake_pandas / ducklake_pyspark
+
+new_version = migrate_catalog("legacy.ducklake")  # "1.0"
+migrate_catalog("legacy.ducklake")                # idempotent — returns "1.0"
+```
+
+After migration, v1.0-only operations become available (`merge_adjacent_files_ducklake`, macros, expression sort keys / defaults, custom column tag keys). Note that v1.0 catalogs are only readable by DuckDB ≥ 1.5 on the DuckDB side.
+
 ## Streaming ingestion
 
-The `DuckLakeStreamWriter` provides buffered micro-batch ingestion with auto-flush and compaction:
+The `DuckLakeStreamWriter` (Polars and Pandas wrappers; not available in `ducklake_pyspark`) provides buffered micro-batch ingestion with auto-flush and compaction:
 
 ```python
 from ducklake_polars import DuckLakeStreamWriter
@@ -405,6 +422,48 @@ Parameters:
 - `flush_threshold=10000` — rows before auto-flush
 - `compact_on_close=True` — run `rewrite_data_files` on close
 - `schema_evolution="strict"` — or `"merge"` to auto-add new columns
+
+**Exception handling:** if the context exits via an exception, any unflushed rows in the buffer are dropped (no partial micro-batch is committed). Already-flushed batches that landed before the exception remain visible — DuckLake gives no cross-flush atomicity, so design downstream consumers accordingly.
+
+## Change data feed
+
+`scan_ducklake_changes` / `read_ducklake_changes` return a row-level diff between two snapshots with a `change_type` column (`insert`, `delete`, `update_preimage`, `update_postimage`):
+
+```python
+from ducklake_polars import read_ducklake_changes, DuckLakeCatalog
+
+cat = DuckLakeCatalog("catalog.ducklake")
+latest = cat.current_snapshot()
+changes = read_ducklake_changes("catalog.ducklake", "users", start_version=0, end_version=latest)
+
+# Just inserts / deletes via the catalog API
+cat.table_insertions("users", start_version=0, end_version=latest)
+cat.table_deletions("users", start_version=0, end_version=latest)
+```
+
+The `start_version` is exclusive and `end_version` inclusive; passing `start > end` raises `ValueError` and an `end` past the current snapshot raises a "snapshot not found" error.
+
+## Compaction
+
+`merge_adjacent_files_ducklake` and `cleanup_old_files_ducklake` are available in the Polars and Pandas wrappers (not in `ducklake_pyspark`); `rewrite_data_files_ducklake` is available in all three. `merge_adjacent_files_ducklake` (DuckLake v1.0+, requires DuckDB ≥ 1.5 for full DuckDB-side interop) merges already-adjacent small files within partitions and is the lightweight option. `rewrite_data_files_ducklake` is the heavier alternative that fully rewrites all of a table's data files (and applies pending positional deletes). Both schedule retired source files for physical deletion via `cleanup_old_files_ducklake`.
+
+```python
+from ducklake_polars import (
+    rewrite_data_files_ducklake,
+    merge_adjacent_files_ducklake,
+    cleanup_old_files_ducklake,
+)
+from datetime import datetime, timedelta, timezone
+
+# After many small appends:
+rewrite_data_files_ducklake("catalog.ducklake", "events")
+
+# Drain the deletion queue (only deletes files older than the cutoff):
+removed = cleanup_old_files_ducklake(
+    "catalog.ducklake",
+    older_than=datetime.now(timezone.utc) + timedelta(days=1),
+)
+```
 
 ## Features
 
@@ -451,11 +510,11 @@ Parameters:
 - **`rewrite_data_files_ducklake`** — compact small files and apply pending deletes
 
 ### Catalog backends
-- **SQLite** — Python stdlib `sqlite3` (zero dependency)
+- **SQLite** — Python stdlib `sqlite3` (zero dependency). Catalogs are auto-flipped to WAL mode on first write so concurrent readers don't collide with an in-flight writer.
 - **DuckDB** — `.ducklake` files are SQLite-format, read via `sqlite3`
 - **PostgreSQL** — via `psycopg2` (optional `[postgres]` extra)
 
-Catalogs are fully interoperable with DuckDB's native DuckLake extension. Both DuckLake catalog format **v0.3** and **v0.4** are supported.
+Catalogs are fully interoperable with DuckDB's native DuckLake extension. New catalogs are bootstrapped at format **v1.0**; **v0.3** and **v0.4** catalogs are read-compatible (basic writes also work). Up-migration is **opt-in** — call `migrate_catalog(path)` (re-exported from `ducklake_polars`, `ducklake_pandas`, and `ducklake_pyspark`) to bring an older catalog up to v1.0 in place. v1.0-only operations (macros, `merge_adjacent_files`, expression sort keys, expression defaults, custom column tag keys) raise an explicit version error against pre-1.0 catalogs.
 
 ## Data types
 
@@ -469,7 +528,7 @@ Catalogs are fully interoperable with DuckDB's native DuckLake extension. Both D
 | `BLOB` | `Binary` | |
 | `DATE` | `Date` | |
 | `TIME` / `TIMETZ` / `TIME_NS` | `Time` | |
-| `TIMESTAMP` (all precisions) | `Datetime("us"/"ms"/"ns")` | |
+| `TIMESTAMP` (all precisions) | `Datetime("us"/"ms"/"ns")` | `TIMESTAMP_S` maps to `Datetime("us")` since DuckDB writes all timestamps to Parquet as microseconds |
 | `TIMESTAMPTZ` | `Datetime("us", "UTC")` | |
 | `DECIMAL(p, s)` | `Decimal(p, s)` | |
 | `UUID` | `Binary` | 16-byte binary in Parquet |
@@ -560,6 +619,7 @@ See the [PySpark wiki page](https://github.com/pdet/ducklake-dataframe/wiki/PySp
 - **VARIANT binary interop** — VARIANT columns are schema-mapped as String, but the binary format used by DuckDB is not interoperable.
 - **HUGEINT precision** — DuckDB writes HUGEINT as Float64 in Parquet, causing precision loss for large values.
 - **MAP type** — Polars reads MAP columns as `List(Struct(key, value))` due to a Polars Parquet reader limitation.
+- **INTERVAL type** — Polars cannot read DuckDB's `month_day_millisecond_interval` Parquet representation; reads of INTERVAL columns are unsupported.
 
 See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for the full compatibility matrix.
 
@@ -597,6 +657,8 @@ cd ducklake-dataframe
 pip install -e ".[dev]"
 ```
 
+The `[dev]` extra pulls `duckdb` for fixture generation. DuckDB **≥ 1.5** unlocks the v10 catalog features used by some tests (macros, `merge_adjacent_files`, `cleanup_old_files`, custom column-tag keys, expression sort keys, expression defaults, schema-version-per-table, name-mapping reads). On DuckDB 1.4.x those tests are skipped via `_duckdb_supports_v10()`.
+
 ### Running tests
 
 ```bash
@@ -608,7 +670,7 @@ pytest -k "test_views"    # Specific pattern
 DUCKLAKE_PG_DSN="postgresql://user:pass@localhost/testdb" pytest
 ```
 
-Test suite: **1,527+ tests** (5 xfailed for known DuckDB/Polars limitations). Tests cover all three engines (Polars, Pandas, PySpark) and are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. All wrappers are tested for interoperability with DuckDB's native extension.
+Test suite: **2,300+ tests** (24 xfailed for known DuckDB/Polars limitations, 4 xpassed). Tests cover all three engines (Polars, Pandas, PySpark) and are parametrized over backends — SQLite always runs; PostgreSQL runs when `DUCKLAKE_PG_DSN` is set. All wrappers are tested for interoperability with DuckDB's native extension.
 
 ### Benchmarks
 

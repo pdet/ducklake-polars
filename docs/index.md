@@ -1,28 +1,29 @@
 # ducklake-dataframe
 
-Pure-Python [Polars](https://pola.rs/) and [Pandas](https://pandas.pydata.org/) integration for [DuckLake](https://ducklake.select/) catalogs — read and write, no DuckDB runtime required.
+Pure-Python [Polars](https://pola.rs/), [Pandas](https://pandas.pydata.org/), and [PySpark](https://spark.apache.org/docs/latest/api/python/) integration for [DuckLake](https://ducklake.select/) catalogs — read and write, no DuckDB runtime required.
 
-ducklake-dataframe reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through Polars' native Parquet reader or PyArrow. With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning.
+ducklake-dataframe reads and writes DuckLake metadata directly from SQLite, PostgreSQL, or DuckDB catalog files and scans the underlying Parquet data files through each engine's native Parquet reader or PyArrow. With Polars you get lazy evaluation, predicate pushdown, projection pushdown, file pruning, and all other Polars optimizations out of the box. With Pandas you get familiar DataFrame ergonomics with partition and statistics-based file pruning. With PySpark you get distributed reads and writes with schema evolution and position-delete handling.
 
 > **Note:** This project is a proof of concept, 100% written by [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code/overview). It is not intended for production use.
 
 ## Architecture
 
 ```
-┌─────────────────┐  ┌─────────────────┐
-│  ducklake_polars │  │  ducklake_pandas │   ← Thin wrappers (API + reader)
-└────────┬────────┘  └────────┬────────┘
-         │                    │
-         └────────┬───────────┘
-                  │
-         ┌────────▼────────┐
-         │   ducklake_core  │   ← Shared engine (catalog, writer, schema, backend)
-         └─────────────────┘
+┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+│  ducklake_polars │  │  ducklake_pandas │  │  ducklake_pyspark │  ← Thin wrappers (API + reader)
+└────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
+         │                    │                    │
+         └────────────┬───────┴────────────────────┘
+                      │
+             ┌────────▼────────┐
+             │   ducklake_core  │   ← Shared engine (catalog, writer, schema, backend)
+             └─────────────────┘
 ```
 
 - **`ducklake_core`** — All catalog I/O, write operations, schema mapping, and backend adapters. Uses PyArrow as the internal data representation.
 - **`ducklake_polars`** — Polars-specific reader (lazy `scan_parquet` via `PythonDatasetProvider`), plus a thin API that converts between Polars types and Arrow.
 - **`ducklake_pandas`** — Pandas-specific reader (eager via PyArrow → Pandas conversion), plus a thin API that converts between Pandas types and Arrow.
+- **`ducklake_pyspark`** — PySpark-specific reader (distributed via Spark's native Parquet reader), plus a thin API that converts between PySpark types and Arrow.
 
 ## Installation
 
@@ -33,7 +34,10 @@ pip install ducklake-dataframe[polars]
 # Pandas engine
 pip install ducklake-dataframe[pandas]
 
-# Both engines
+# PySpark engine
+pip install ducklake-dataframe[pyspark]
+
+# Multiple engines
 pip install ducklake-dataframe[polars,pandas]
 
 # With PostgreSQL catalog backend
@@ -52,6 +56,7 @@ pip install ducklake-dataframe[all]
 |---|---|
 | `polars` | `polars >= 1.0` — Polars engine with lazy evaluation |
 | `pandas` | `pandas >= 1.5` — Pandas engine |
+| `pyspark` | `pyspark >= 3.4` — distributed PySpark engine |
 | `postgres` | `psycopg2` — PostgreSQL catalog backend |
 | `duckdb` | `duckdb` — DuckDB catalog backend |
 | `s3` | `s3fs` — S3 object storage |
@@ -180,13 +185,14 @@ print(lf.collect())
 
 ### Read path
 
-- **Lazy and eager reads** — `scan_ducklake()` (Polars LazyFrame) / `read_ducklake()` (eager)
-- **Predicate and projection pushdown** — through Polars' native optimizer; Pandas supports `columns=` and `predicate=`
+- **Lazy and eager reads** — `scan_ducklake()` (Polars LazyFrame) / `read_ducklake()` (eager); PySpark `read_ducklake(spark, ...)` returns a Spark DataFrame
+- **Predicate and projection pushdown** — through Polars' native optimizer; Pandas supports `columns=` and `predicate=`; PySpark uses Spark's native Parquet pushdown
 - **File pruning** — column-level min/max statistics and partition values
 - **Time travel** — by snapshot version or timestamp
 - **Delete file handling** — Iceberg-compatible positional deletes (cumulative delete files supported)
 - **Schema evolution** — ADD/DROP/RENAME COLUMN handled transparently across file versions
 - **Inlined data** — small tables stored directly in catalog metadata, read transparently
+- **Change data feed** — `read_ducklake_changes()` returns insertions/deletions between snapshot versions
 
 ### Write path
 
@@ -214,8 +220,8 @@ print(lf.collect())
 
 ### Catalog backends
 
-- **SQLite** — Python stdlib `sqlite3` (zero dependency)
+- **SQLite** — Python stdlib `sqlite3` (zero dependency). Auto-flips to WAL mode on first write so concurrent readers work alongside one writer.
 - **DuckDB** — `.ducklake` files are SQLite-format, read via `sqlite3`
 - **PostgreSQL** — via `psycopg2` (optional `[postgres]` extra)
 
-Both DuckLake catalog format **v0.3** and **v0.4** are supported.
+DuckLake catalog format **v1.0** is the default for new catalogs. **v0.3** and **v0.4** catalogs are read-compatible; up-migration is opt-in via `migrate_catalog(path)` (re-exported from each engine wrapper). v1.0-only operations raise an explicit version error against pre-1.0 catalogs.

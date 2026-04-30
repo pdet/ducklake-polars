@@ -99,7 +99,7 @@ class TestBootstrapCatalog:
         con.close()
 
         keys = {r[0]: r[1] for r in rows}
-        assert keys["version"] == "0.4"
+        assert keys["version"] == "1.0"
         assert keys["created_by"] == "ducklake-dataframe"
         assert keys["encrypted"] == "false"
         assert "data_path" in keys
@@ -124,6 +124,55 @@ class TestBootstrapCatalog:
         assert schema is not None
         assert schema[0] == 0  # schema_id
         assert schema[4] == "main"  # schema_name
+
+    def test_snapshot_changes_seeded(self, tmp_path):
+        """Snapshot 0 must record `created_schema:"main"` to match the
+        C++ bootstrap (ducklake_metadata_manager.cpp:182). Without this
+        row the change-feed sees a hole at snapshot 0 and DuckDB
+        diagnostics flag the missing entry.
+        """
+        path = str(tmp_path / "test.ducklake")
+        bootstrap_catalog(path)
+
+        con = sqlite3.connect(path)
+        rows = con.execute(
+            "SELECT snapshot_id, changes_made FROM ducklake_snapshot_changes"
+        ).fetchall()
+        con.close()
+        assert rows == [(0, 'created_schema:"main"')]
+
+    def test_ddl_uses_native_types(self, tmp_path):
+        """Boolean/timestamp/UUID columns must be declared with their
+        native types so the catalog round-trips through Postgres
+        without affinity tricks."""
+        path = str(tmp_path / "test.ducklake")
+        bootstrap_catalog(path)
+
+        con = sqlite3.connect(path)
+        try:
+            cols = {
+                row[1]: row[2]
+                for row in con.execute(
+                    "PRAGMA table_info(ducklake_data_file)"
+                ).fetchall()
+            }
+            assert cols["path_is_relative"].upper() == "BOOLEAN"
+            snap_cols = {
+                row[1]: row[2]
+                for row in con.execute(
+                    "PRAGMA table_info(ducklake_snapshot)"
+                ).fetchall()
+            }
+            assert snap_cols["snapshot_time"].upper() == "TIMESTAMPTZ"
+            schema_cols = {
+                row[1]: row[2]
+                for row in con.execute(
+                    "PRAGMA table_info(ducklake_schema)"
+                ).fetchall()
+            }
+            assert schema_cols["schema_uuid"].upper() == "UUID"
+        finally:
+            con.close()
 
     def test_idempotent(self, tmp_path):
         path = str(tmp_path / "test.ducklake")
@@ -153,16 +202,40 @@ class TestBootstrapCatalog:
         bootstrap_catalog(path)
         assert os.path.exists(path)
 
+    def test_no_seed_schema_version_row(self, tmp_path):
+        """v1.0 requires ducklake_schema_versions.table_id to be non-NULL.
+
+        Bootstrap must not seed a row before any table exists. The writer
+        inserts a per-table row when tables are created.
+        """
+        path = str(tmp_path / "test.ducklake")
+        bootstrap_catalog(path)
+
+        con = sqlite3.connect(path)
+        rows = con.execute("SELECT * FROM ducklake_schema_versions").fetchall()
+        con.close()
+        assert rows == []
+
+    def test_version_is_one_dot_zero(self, tmp_path):
+        path = str(tmp_path / "test.ducklake")
+        bootstrap_catalog(path)
+        con = sqlite3.connect(path)
+        version = con.execute(
+            "SELECT value FROM ducklake_metadata WHERE key = 'version'"
+        ).fetchone()
+        con.close()
+        assert version == ("1.0",)
+
 
 class TestDuckDBInterop:
     """Test that a bootstrapped catalog is readable by DuckDB."""
 
     @pytest.fixture(autouse=True)
     def _require_duckdb_v1_5(self):
-        """Skip if DuckDB < 1.5.0 (no v0.4 catalog support)."""
+        """Skip if DuckDB < 1.5.0 (no v1.0 catalog support)."""
         parts = duckdb.__version__.split(".")
         if len(parts) >= 2 and (int(parts[0]), int(parts[1])) < (1, 5):
-            pytest.skip(f"DuckDB {duckdb.__version__} does not support v0.4 catalogs")
+            pytest.skip(f"DuckDB {duckdb.__version__} does not support v1.0 catalogs")
 
     def test_duckdb_can_attach(self, tmp_path):
         path = str(tmp_path / "test.ducklake")
@@ -249,6 +322,36 @@ class TestDuckDBInterop:
             "price": [9.99, 19.99],
         })
         assert_frame_equal(result, expected)
+
+    def test_duckdb_attach_to_one_dot_zero_catalog(self, tmp_path):
+        """DuckDB can attach to a v1.0-tagged catalog produced by bootstrap.
+
+        Requires DuckDB ≥ 1.5 (the autoused fixture skips otherwise). The
+        catalog version stays at '1.0' after attach (no auto-migration
+        needed; we already wrote the latest version).
+        """
+        path = str(tmp_path / "catalog.ducklake")
+        data_path = str(tmp_path / "data")
+        bootstrap_catalog(path, data_path=data_path)
+
+        con = duckdb.connect()
+        con.install_extension("ducklake")
+        con.load_extension("ducklake")
+        con.execute(
+            f"ATTACH 'ducklake:sqlite:{path}' AS ducklake "
+            f"(DATA_PATH '{data_path}')"
+        )
+        con.execute("CREATE TABLE ducklake.r (a INTEGER)")
+        con.execute("INSERT INTO ducklake.r VALUES (1), (2)")
+        con.close()
+
+        # The version row should still be 1.0 (no migration happened).
+        con = sqlite3.connect(path)
+        version = con.execute(
+            "SELECT value FROM ducklake_metadata WHERE key = 'version'"
+        ).fetchone()
+        con.close()
+        assert version == ("1.0",)
 
 
 class TestWriteDucklakeBootstrap:

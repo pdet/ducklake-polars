@@ -286,7 +286,7 @@ class TestOptions:
         result = api.options()
 
         assert isinstance(result, pd.DataFrame)
-        assert list(result.columns) == ["key", "value"]
+        assert list(result.columns) == ["key", "value", "scope", "scope_id"]
         # Should have at least the data_path key
         keys = result["key"].tolist()
         assert "data_path" in keys

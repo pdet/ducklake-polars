@@ -8,7 +8,8 @@ import uuid
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
-# DDL for the DuckLake catalog tables (matches DuckDB v0.4 catalog layout)
+# DDL for the DuckLake catalog tables (matches DuckDB v1.0 catalog layout —
+# identical schema to v0.4; only the ``ducklake_metadata.version`` value differs).
 # ---------------------------------------------------------------------------
 
 _CATALOG_DDL: list[str] = [
@@ -20,7 +21,7 @@ _CATALOG_DDL: list[str] = [
     )""",
     """CREATE TABLE ducklake_snapshot(
         snapshot_id BIGINT PRIMARY KEY,
-        snapshot_time VARCHAR,
+        snapshot_time TIMESTAMPTZ,
         schema_version BIGINT,
         next_catalog_id BIGINT,
         next_file_id BIGINT
@@ -34,12 +35,12 @@ _CATALOG_DDL: list[str] = [
     )""",
     """CREATE TABLE ducklake_schema(
         schema_id BIGINT PRIMARY KEY,
-        schema_uuid VARCHAR,
+        schema_uuid UUID,
         begin_snapshot BIGINT,
         end_snapshot BIGINT,
         schema_name VARCHAR,
         path VARCHAR,
-        path_is_relative BIGINT
+        path_is_relative BOOLEAN
     )""",
     """CREATE TABLE ducklake_schema_versions(
         begin_snapshot BIGINT,
@@ -48,13 +49,13 @@ _CATALOG_DDL: list[str] = [
     )""",
     """CREATE TABLE ducklake_table(
         table_id BIGINT,
-        table_uuid VARCHAR,
+        table_uuid UUID,
         begin_snapshot BIGINT,
         end_snapshot BIGINT,
         schema_id BIGINT,
         table_name VARCHAR,
         path VARCHAR,
-        path_is_relative BIGINT
+        path_is_relative BOOLEAN
     )""",
     """CREATE TABLE ducklake_column(
         column_id BIGINT,
@@ -66,7 +67,7 @@ _CATALOG_DDL: list[str] = [
         column_type VARCHAR,
         initial_default VARCHAR,
         default_value VARCHAR,
-        nulls_allowed BIGINT,
+        nulls_allowed BOOLEAN,
         parent_column BIGINT,
         default_value_type VARCHAR,
         default_value_dialect VARCHAR
@@ -78,7 +79,7 @@ _CATALOG_DDL: list[str] = [
         end_snapshot BIGINT,
         file_order BIGINT,
         path VARCHAR,
-        path_is_relative BIGINT,
+        path_is_relative BOOLEAN,
         file_format VARCHAR,
         record_count BIGINT,
         file_size_bytes BIGINT,
@@ -96,7 +97,7 @@ _CATALOG_DDL: list[str] = [
         end_snapshot BIGINT,
         data_file_id BIGINT,
         path VARCHAR,
-        path_is_relative BIGINT,
+        path_is_relative BOOLEAN,
         format VARCHAR,
         delete_count BIGINT,
         file_size_bytes BIGINT,
@@ -113,7 +114,7 @@ _CATALOG_DDL: list[str] = [
         null_count BIGINT,
         min_value VARCHAR,
         max_value VARCHAR,
-        contains_nan BIGINT,
+        contains_nan BOOLEAN,
         extra_stats VARCHAR
     )""",
     """CREATE TABLE ducklake_file_partition_value(
@@ -133,14 +134,14 @@ _CATALOG_DDL: list[str] = [
         null_count BIGINT,
         min_value VARCHAR,
         max_value VARCHAR,
-        contains_nan BIGINT,
+        contains_nan BOOLEAN,
         extra_stats VARCHAR
     )""",
     """CREATE TABLE ducklake_files_scheduled_for_deletion(
         data_file_id BIGINT,
         path VARCHAR,
-        path_is_relative BIGINT,
-        schedule_start VARCHAR
+        path_is_relative BOOLEAN,
+        schedule_start TIMESTAMPTZ
     )""",
     """CREATE TABLE ducklake_inlined_data_tables(
         table_id BIGINT,
@@ -158,7 +159,7 @@ _CATALOG_DDL: list[str] = [
         source_name VARCHAR,
         target_field_id BIGINT,
         parent_column BIGINT,
-        is_partition BIGINT
+        is_partition BOOLEAN
     )""",
     """CREATE TABLE ducklake_partition_column(
         partition_id BIGINT,
@@ -205,7 +206,7 @@ _CATALOG_DDL: list[str] = [
     )""",
     """CREATE TABLE ducklake_view(
         view_id BIGINT,
-        view_uuid VARCHAR,
+        view_uuid UUID,
         begin_snapshot BIGINT,
         end_snapshot BIGINT,
         schema_id BIGINT,
@@ -268,8 +269,19 @@ def _needs_bootstrap(path: str) -> bool:
     if os.path.getsize(abs_path) == 0:
         return True
     # File exists and has content — check for the marker table.
+    # Use a regular connection (not URI ``mode=ro``): a WAL-mode catalog needs
+    # to open the ``-shm`` / ``-wal`` files, which read-only URI mode forbids.
+    # If the probe errors with a transient/concurrent-access message
+    # (e.g. another process — DuckDB's ducklake extension — has the file
+    # attached and SQLite momentarily returns "disk I/O error" or
+    # "database is locked"), default to "no bootstrap needed": the file
+    # already has content, so we should not risk re-bootstrapping over a
+    # populated catalog. Other OperationalErrors (genuinely corrupt header,
+    # truncated file, unreadable database) propagate so the caller surfaces
+    # the real error rather than silently overwriting state.
+    _TRANSIENT_FRAGMENTS = ("disk i/o error", "database is locked")
     try:
-        con = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
+        con = sqlite3.connect(abs_path, timeout=30)
         try:
             row = con.execute(
                 "SELECT COUNT(*) FROM sqlite_master "
@@ -278,8 +290,66 @@ def _needs_bootstrap(path: str) -> bool:
             return row is None or row[0] == 0
         finally:
             con.close()
-    except sqlite3.OperationalError:
-        return True
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if any(frag in msg for frag in _TRANSIENT_FRAGMENTS):
+            return False
+        raise
+
+
+_INITIAL_INSERTS_TEMPLATE = (
+    ("ducklake_metadata", "(?, ?, NULL, NULL)", ("version", "1.0")),
+    ("ducklake_metadata", "(?, ?, NULL, NULL)", ("created_by", "ducklake-dataframe")),
+    ("ducklake_metadata", "(?, ?, NULL, NULL)", ("encrypted", "false")),
+)
+
+
+def _seed_catalog(
+    execute,
+    *,
+    data_path: str,
+    placeholder: str = "?",
+) -> None:
+    """Seed an initialised catalog (tables already created) with snapshot 0.
+
+    *execute* is a callable taking ``(sql, params)``. *placeholder* is
+    ``?`` for SQLite and ``%s`` for PostgreSQL.
+    """
+    p = placeholder
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00")
+    schema_uuid = str(uuid.uuid4())
+
+    for table, _values, params in _INITIAL_INSERTS_TEMPLATE:
+        execute(
+            f"INSERT INTO {table} VALUES ({p}, {p}, NULL, NULL)", params,
+        )
+    execute(
+        f"INSERT INTO ducklake_metadata VALUES ({p}, {p}, NULL, NULL)",
+        ("data_path", data_path),
+    )
+    execute(
+        f"INSERT INTO ducklake_snapshot VALUES ({p}, {p}, {p}, {p}, {p})",
+        (0, now, 0, 1, 0),
+    )
+    execute(
+        "INSERT INTO ducklake_schema VALUES "
+        f"({p}, {p}, {p}, NULL, {p}, {p}, {p})",
+        (0, schema_uuid, 0, "main", "main/", True),
+    )
+    # ducklake_snapshot_changes seed row for snapshot 0: matches the
+    # row C++ writes at metadata_manager.cpp:182. Without this, our
+    # change-feed and DuckDB diagnostics report a missing entry.
+    execute(
+        "INSERT INTO ducklake_snapshot_changes "
+        f"(snapshot_id, changes_made, author, commit_message, commit_extra_info) "
+        f"VALUES ({p}, {p}, NULL, NULL, NULL)",
+        (0, 'created_schema:"main"'),
+    )
+    # Note: no seed row in ducklake_schema_versions. v1.0 requires
+    # ``table_id`` to be non-NULL on every row; the writer inserts a row
+    # per-table at creation time. (See MigrateV03 in
+    # ducklake_metadata_manager.cpp, which deletes pre-1.0 NULL-table_id
+    # entries.)
 
 
 def bootstrap_catalog(path: str, *, data_path: str | None = None) -> None:
@@ -320,44 +390,85 @@ def bootstrap_catalog(path: str, *, data_path: str | None = None) -> None:
 
     con = sqlite3.connect(abs_path)
     try:
-        # Create all 22 catalog tables
+        # WAL mode allows concurrent readers alongside one writer; without it,
+        # a reader colliding with a write transaction can surface as "disk I/O
+        # error" on macOS. Persisted in the file header — one-shot at bootstrap.
+        con.execute("PRAGMA journal_mode=WAL")
+        # Create all catalog tables
         for ddl in _CATALOG_DDL:
             con.execute(ddl)
 
-        # Seed metadata
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f+00")
-        schema_uuid = str(uuid.uuid4())
+        def _exec(sql, params):
+            con.execute(sql, params)
 
-        con.execute(
-            "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
-            ("version", "0.4"),
-        )
-        con.execute(
-            "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
-            ("created_by", "ducklake-dataframe"),
-        )
-        con.execute(
-            "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
-            ("encrypted", "false"),
-        )
-        con.execute(
-            "INSERT INTO ducklake_metadata VALUES (?, ?, NULL, NULL)",
-            ("data_path", data_path),
-        )
-        con.execute(
-            "INSERT INTO ducklake_snapshot VALUES (?, ?, ?, ?, ?)",
-            (0, now, 0, 1, 0),
-        )
-        con.execute(
-            "INSERT INTO ducklake_schema VALUES (?, ?, ?, NULL, ?, ?, ?)",
-            (0, schema_uuid, 0, "main", "main/", 1),
-        )
-        con.execute(
-            "INSERT INTO ducklake_schema_versions VALUES (?, ?, NULL)",
-            (0, 0),
-        )
-
+        _seed_catalog(_exec, data_path=data_path, placeholder="?")
         con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def _needs_bootstrap_postgres(con) -> bool:
+    """Return True if a Postgres catalog is missing the marker table."""
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name = 'ducklake_metadata' LIMIT 1"
+        )
+        return cur.fetchone() is None
+    finally:
+        cur.close()
+
+
+def bootstrap_catalog_postgres(
+    connection_string: str, *, data_path: str | None = None,
+) -> None:
+    """Bootstrap a PostgreSQL DuckLake catalog.
+
+    Creates all DuckLake catalog tables in the target schema (default
+    ``public``) and seeds the snapshot 0 / metadata rows. Idempotent.
+
+    The PG-native types ``BOOLEAN``, ``TIMESTAMPTZ``, and ``UUID`` round
+    through cleanly; the writer code reads ``bool(value)`` /
+    ``str(value)`` so values from either backend are interpreted
+    consistently.
+    """
+    try:
+        import psycopg2
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "psycopg2 is required for PostgreSQL catalog bootstrap"
+        ) from exc
+
+    if data_path is None:
+        # No file-system anchor for PG — caller must provide.
+        raise ValueError(
+            "bootstrap_catalog_postgres requires an explicit data_path"
+        )
+    data_path = os.path.abspath(data_path)
+    if not data_path.endswith("/"):
+        data_path = data_path + "/"
+    os.makedirs(data_path, exist_ok=True)
+
+    con = psycopg2.connect(connection_string)
+    try:
+        if not _needs_bootstrap_postgres(con):
+            return
+        cur = con.cursor()
+        try:
+            for ddl in _CATALOG_DDL:
+                cur.execute(ddl)
+
+            def _exec(sql, params):
+                cur.execute(sql, params)
+
+            _seed_catalog(_exec, data_path=data_path, placeholder="%s")
+            con.commit()
+        finally:
+            cur.close()
     except Exception:
         con.rollback()
         raise

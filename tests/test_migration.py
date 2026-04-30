@@ -576,6 +576,83 @@ class TestUnsupportedVersion:
 
 
 def test_supported_versions_include_expected():
-    """SUPPORTED_DUCKLAKE_VERSIONS includes 0.3 and 0.4."""
+    """SUPPORTED_DUCKLAKE_VERSIONS includes 0.3, 0.4, and 1.0."""
     assert "0.3" in SUPPORTED_DUCKLAKE_VERSIONS
     assert "0.4" in SUPPORTED_DUCKLAKE_VERSIONS
+    assert "1.0" in SUPPORTED_DUCKLAKE_VERSIONS
+
+
+# ------------------------------------------------------------------
+# v1.0 catalog compatibility
+# ------------------------------------------------------------------
+
+
+def _create_v10_catalog(db_path: str, data_path: str) -> None:
+    """Create a minimal v1.0-style DuckLake catalog via raw SQL.
+
+    The v1.0 schema is identical to v0.4; the only on-disk change is
+    ``ducklake_metadata.value = '1.0'``. (See MigrateV04 in
+    ducklake_metadata_manager.cpp.)
+    """
+    _create_v04_catalog(db_path, data_path)
+    con = sqlite3.connect(db_path)
+    try:
+        con.execute(
+            "UPDATE ducklake_metadata SET value = '1.0' WHERE key = 'version'"
+        )
+        con.execute(
+            "UPDATE ducklake_table SET table_name = 'modern10_table' "
+            "WHERE table_name = 'modern_table'"
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+class TestV10Catalog:
+    """Test reading a v1.0-style catalog."""
+
+    def test_read_v10_catalog_metadata(self, tmp_path):
+        """Can open and read metadata from a v1.0 catalog."""
+        db_path = str(tmp_path / "v10.ducklake")
+        data_path = str(tmp_path / "data")
+        os.makedirs(data_path, exist_ok=True)
+
+        _create_v10_catalog(db_path, data_path)
+
+        with DuckLakeCatalogReader(db_path, data_path_override=data_path) as reader:
+            snap = reader.get_current_snapshot()
+            assert snap.snapshot_id == 0
+
+            table = reader.get_table("modern10_table", "main", snap.snapshot_id)
+            assert table.table_name == "modern10_table"
+
+            cols = reader.get_columns(table.table_id, snap.snapshot_id)
+            col_names = [c.column_name for c in cols]
+            assert "id" in col_names
+            assert "name" in col_names
+
+    def test_read_v10_catalog_empty_table(self, tmp_path):
+        """Reading an empty v1.0 table returns empty DataFrame."""
+        db_path = str(tmp_path / "v10.ducklake")
+        data_path = str(tmp_path / "data")
+        os.makedirs(data_path, exist_ok=True)
+
+        _create_v10_catalog(db_path, data_path)
+
+        result = read_ducklake(db_path, "modern10_table", data_path=data_path)
+        assert result.shape[0] == 0
+        assert "id" in result.columns
+        assert "name" in result.columns
+
+    def test_read_v10_catalog_version_recognized(self, tmp_path):
+        """v1.0 version string is accepted (no CatalogVersionError)."""
+        db_path = str(tmp_path / "v10.ducklake")
+        data_path = str(tmp_path / "data")
+        os.makedirs(data_path, exist_ok=True)
+
+        _create_v10_catalog(db_path, data_path)
+
+        with DuckLakeCatalogReader(db_path, data_path_override=data_path) as reader:
+            reader.get_current_snapshot()
+            assert reader._catalog_version == "1.0"

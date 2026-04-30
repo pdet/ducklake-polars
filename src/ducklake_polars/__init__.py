@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
     import polars  # noqa: F401
@@ -20,12 +20,14 @@ if TYPE_CHECKING:
     import polars as pl
 
 from ducklake_core._catalog import DuckLakeCatalogReader
+from ducklake_core._migration import migrate_catalog
 from ducklake_core._writer import TransactionConflictError
 from ducklake_core._exceptions import UnsupportedUnionTypeError
 from ducklake_polars._catalog_api import DuckLakeCatalog
 
 __all__ = [
     "TransactionConflictError",
+    "migrate_catalog",
     "scan_ducklake",
     "read_ducklake",
     "write_ducklake",
@@ -49,6 +51,12 @@ __all__ = [
     "expire_snapshots",
     "vacuum_ducklake",
     "rewrite_data_files_ducklake",
+    "merge_adjacent_files_ducklake",
+    "cleanup_old_files_ducklake",
+    "delete_orphaned_files_ducklake",
+    "create_ducklake_macro",
+    "drop_ducklake_macro",
+    "set_ducklake_option",
     "DuckLakeStreamWriter",
     "scan_ducklake_changes",
     "read_ducklake_changes",
@@ -512,7 +520,10 @@ def merge_ducklake(
     on: str | list[str],
     *,
     when_matched_update: dict[str, object] | bool | None = None,
+    when_matched_delete: bool = False,
     when_not_matched_insert: bool = True,
+    when_not_matched_by_source_delete: bool = False,
+    when_not_matched_by_source_update: dict[str, object] | None = None,
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
@@ -574,7 +585,14 @@ def merge_ducklake(
             table,
             on,
             when_matched_update=when_matched_update,
+            when_matched_delete=when_matched_delete,
             when_not_matched_insert=when_not_matched_insert,
+            when_not_matched_by_source_delete=(
+                when_not_matched_by_source_delete
+            ),
+            when_not_matched_by_source_update=(
+                when_not_matched_by_source_update
+            ),
             schema_name=schema,
         )
 
@@ -1080,7 +1098,7 @@ def rename_ducklake_table(
 def alter_ducklake_set_partitioned_by(
     path: str | Path,
     table: str,
-    columns: list[str],
+    columns: list[str] | list[tuple[str, str]],
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
@@ -1088,7 +1106,7 @@ def alter_ducklake_set_partitioned_by(
     commit_message: str | None = None,
 ) -> None:
     """
-    Set identity-transform partitioning on a DuckLake table.
+    Set partitioning on a DuckLake table.
 
     Equivalent to ``ALTER TABLE t SET PARTITIONED BY (col1, col2, ...)``.
     Future inserts will write one Parquet file per unique combination of
@@ -1102,7 +1120,11 @@ def alter_ducklake_set_partitioned_by(
     table
         Name of the table to partition.
     columns
-        Column names to partition by (identity transform).
+        Either a list of column names (each gets the ``identity`` transform)
+        or a list of ``(column_name, transform)`` tuples. Supported
+        transforms are ``"identity"``, ``"year"``, ``"month"``, ``"day"``,
+        and ``"hour"`` (year/month/day/hour require a date or timestamp
+        column).
     schema
         Schema name (default: "main").
     data_path
@@ -1111,7 +1133,8 @@ def alter_ducklake_set_partitioned_by(
     Raises
     ------
     ValueError
-        If the table or any column does not exist.
+        If the table or any column does not exist, or if a transform is
+        applied to an incompatible column type.
     """
     from ducklake_polars._writer import DuckLakeCatalogWriter
 
@@ -1128,7 +1151,7 @@ def alter_ducklake_set_partitioned_by(
 def alter_ducklake_set_sort_keys(
     path: str | Path,
     table: str,
-    sort_keys: list[str | tuple[str, str] | tuple[str, str, str]],
+    sort_keys: list[Any],
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
@@ -1155,6 +1178,11 @@ def alter_ducklake_set_sort_keys(
         - ``"col"`` — ascending, nulls last
         - ``("col", "DESC")`` — descending, nulls last
         - ``("col", "ASC", "NULLS_FIRST")`` — ascending, nulls first
+        - ``{"expression": "date_trunc('hour', ts)", "direction": "ASC",
+          "null_order": "NULLS_LAST", "dialect": "duckdb"}`` — arbitrary
+          SQL expression. The ``dialect`` defaults to ``"duckdb"``;
+          ``is_expression`` defaults to True so column-existence validation
+          is skipped.
     schema
         Schema name (default: "main").
     data_path
@@ -1163,7 +1191,7 @@ def alter_ducklake_set_sort_keys(
     Raises
     ------
     ValueError
-        If the table or any column does not exist.
+        If the table or any column does not exist (column-name form only).
     """
     from ducklake_polars._writer import DuckLakeCatalogWriter
 
@@ -1430,6 +1458,193 @@ def rewrite_data_files_ducklake(
         retry_backoff=retry_backoff,
     ) as writer:
         return writer.rewrite_data_files(table, schema_name=schema)
+
+
+def create_ducklake_macro(
+    path: str | Path,
+    macro_name: str,
+    sql: str,
+    *,
+    macro_type: str = "scalar",
+    dialect: str = "duckdb",
+    parameters: list[dict[str, Any]] | None = None,
+    schema: str = "main",
+    or_replace: bool = False,
+    data_path: str | Path | None = None,
+) -> int:
+    """Create a macro / function in the DuckLake catalog.
+
+    Mirrors DuckDB's ``CREATE MACRO``. Persists rows in
+    ``ducklake_macro``, ``ducklake_macro_impl``, and
+    ``ducklake_macro_parameters``.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        return writer.create_macro(
+            macro_name, sql, macro_type=macro_type, dialect=dialect,
+            parameters=parameters, schema_name=schema, or_replace=or_replace,
+        )
+
+
+def drop_ducklake_macro(
+    path: str | Path,
+    macro_name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None:
+    """Drop a macro from the DuckLake catalog."""
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.drop_macro(macro_name, schema_name=schema)
+
+
+def set_ducklake_option(
+    path: str | Path,
+    key: str,
+    value: Any,
+    *,
+    schema: str | None = None,
+    table_name: str | None = None,
+    data_path: str | Path | None = None,
+) -> None:
+    """Set a scoped DuckLake configuration option.
+
+    Mirrors the DuckDB ``ducklake_set_option`` table function. The
+    option is upserted into ``ducklake_metadata``:
+
+    * No ``schema`` and no ``table_name`` → catalog-wide (``scope IS NULL``).
+    * ``schema`` only → schema-scoped (``scope = 'schema'``).
+    * ``table_name`` (with optional ``schema``) → table-scoped
+      (``scope = 'table'``).
+
+    See the DuckLake docs for the supported option names; this writer
+    validates value formats the same way the C++ extension does.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(metadata_path, data_path_override=dp) as writer:
+        writer.set_option(
+            key, value, schema=schema, table_name=table_name,
+        )
+
+
+def cleanup_old_files_ducklake(
+    path: str | Path,
+    *,
+    older_than: "datetime | None" = None,
+    cleanup_all: bool = False,
+    dry_run: bool = False,
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """Delete files queued in ``ducklake_files_scheduled_for_deletion``.
+
+    Mirrors ``ducklake_cleanup_old_files``. Either ``older_than`` (a
+    ``datetime``) or ``cleanup_all=True`` must be specified.
+
+    Returns the list of file paths processed (or that would be processed
+    when ``dry_run=True``).
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+    ) as writer:
+        return writer.cleanup_old_files(
+            older_than=older_than, cleanup_all=cleanup_all, dry_run=dry_run,
+        )
+
+
+def delete_orphaned_files_ducklake(
+    path: str | Path,
+    *,
+    dry_run: bool = False,
+    data_path: str | Path | None = None,
+) -> list[str]:
+    """Delete Parquet files in the data path that are not catalog-referenced.
+
+    Mirrors ``ducklake_delete_orphaned_files``. Returns the list of paths
+    that were (or would be) deleted.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path, data_path_override=dp,
+    ) as writer:
+        return writer.delete_orphaned_files(dry_run=dry_run)
+
+
+def merge_adjacent_files_ducklake(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    min_file_size: int | None = None,
+    max_file_size: int | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int:
+    """Merge adjacent small data files for a table without expiring snapshots.
+
+    Mirrors ``ducklake_merge_adjacent_files`` from the DuckDB extension.
+    Rows are tagged with a ``_ducklake_internal_snapshot_id`` column embedded
+    in the merged Parquet file, and the highest source snapshot id is
+    written to ``ducklake_data_file.partial_max`` so time-travel reads can
+    filter newer rows.
+
+    Parameters
+    ----------
+    path
+        Path to the DuckLake metadata catalog file.
+    table
+        Name of the table to compact.
+    schema
+        Schema name (default: ``"main"``).
+    data_path
+        Override the data path stored in the catalog.
+    min_file_size
+        Files smaller than this size in bytes are excluded from the merge.
+    max_file_size
+        Files at or above this size are excluded from the merge.
+
+    Returns
+    -------
+    int
+        New snapshot id, or ``-1`` if fewer than two eligible files exist.
+    """
+    from ducklake_polars._writer import DuckLakeCatalogWriter
+
+    metadata_path = os.fspath(path)
+    dp = os.fspath(data_path) if data_path is not None else None
+
+    with DuckLakeCatalogWriter(
+        metadata_path,
+        data_path_override=dp,
+        author=author,
+        commit_message=commit_message,
+    ) as writer:
+        return writer.merge_adjacent_files(
+            table, schema_name=schema,
+            min_file_size=min_file_size, max_file_size=max_file_size,
+        )
 
 
 def set_ducklake_table_tag(
@@ -1748,6 +1963,12 @@ def scan_ducklake_changes(
     import polars as pl
     from ducklake_core._catalog_api import DuckLakeCatalog as _CoreCatalog
 
+    if start_version > end_version:
+        msg = (
+            f"start_version ({start_version}) must be <= end_version "
+            f"({end_version})"
+        )
+        raise ValueError(msg)
     dp = os.fspath(data_path) if data_path is not None else None
     cat = _CoreCatalog(path, data_path=dp)
     arrow_table = cat.table_changes(table, start_version, end_version, schema=schema)
@@ -1841,7 +2062,15 @@ class DuckLakeStreamWriter:
     def __enter__(self) -> DuckLakeStreamWriter:
         return self
 
-    def __exit__(self, *args: object) -> None:
+    def __exit__(self, exc_type: object, *args: object) -> None:
+        # If the context exits via an exception, drop the unflushed buffer
+        # rather than committing a partial micro-batch — flushed batches that
+        # already landed in DuckLake remain visible (DuckLake gives no
+        # cross-flush atomicity).
+        if exc_type is not None:
+            self._buffer.clear()
+            self._buffer_rows = 0
+            return
         self.close()
 
     def append(self, df: pl.DataFrame) -> None:

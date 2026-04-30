@@ -9,7 +9,8 @@ tutorial notebook so you can compare the two APIs side-by-side.
 
 Requirements
 ------------
-    pip install ducklake-dataframe[pandas] duckdb
+    pip install ducklake-dataframe[pandas]
+    pip install duckdb==1.5.2   # macros, custom column tags, merge_adjacent_files
 """
 
 import os, shutil, tempfile, datetime
@@ -22,6 +23,7 @@ WORKDIR  = tempfile.mkdtemp(prefix="ducklake_pandas_tutorial_")
 CATALOG  = os.path.join(WORKDIR, "catalog.ducklake")
 DATAPATH = os.path.join(WORKDIR, "data/")
 print(f"Working directory: {WORKDIR}")
+print(f"DuckDB {duckdb.__version__}")
 
 # ====================================================================
 # 1.  Initialize the catalog with DuckDB
@@ -192,6 +194,23 @@ print(f"Snapshots:\n{snapshots[['snapshot_id', 'snapshot_time']].to_string(index
 snap_v = int(snapshots["snapshot_id"].iloc[-2])  # second-to-last
 old_df = read_ducklake(CATALOG, "users", snapshot_version=snap_v)
 print(f"\nAt snapshot {snap_v}: {len(old_df)} rows")
+
+
+# ====================================================================
+# 5b. Change Data Feed
+# ====================================================================
+print("\n" + "=" * 60)
+print("5b. Change Data Feed")
+print("=" * 60)
+
+from ducklake_pandas import read_ducklake_changes
+
+snap_ids = sorted(catalog.snapshots()["snapshot_id"].tolist())
+changes = read_ducklake_changes(
+    CATALOG, "users", start_version=snap_ids[0], end_version=snap_ids[-1],
+)
+print(f"{len(changes)} changes between snapshots {snap_ids[0]} and {snap_ids[-1]}")
+print(changes.head().to_string(index=False))
 print(old_df.to_string(index=False))
 
 
@@ -304,7 +323,7 @@ print("\n" + "=" * 60)
 print("10. Views")
 print("=" * 60)
 
-from ducklake_pandas import create_ducklake_view, drop_ducklake_view
+from ducklake_pandas import create_ducklake_view
 
 create_ducklake_view(
     CATALOG, "active_users",
@@ -344,11 +363,38 @@ from ducklake_pandas import (
 
 set_ducklake_table_tag(CATALOG, "users", "owner", "analytics-team")
 set_ducklake_table_tag(CATALOG, "users", "pii", "true")
-set_ducklake_column_tag(CATALOG, "users", "contact", "pii_type", "email")
+# DuckDB's ducklake extension currently only round-trips the `comment` key
+# for columns; table tags do accept arbitrary keys on DuckDB 1.5+.
+set_ducklake_column_tag(CATALOG, "users", "contact", "comment", "PII: email")
 print("Set tags on users table and contact column")
 
 delete_ducklake_table_tag(CATALOG, "users", "pii")
 print("Deleted 'pii' tag")
+
+
+# ====================================================================
+# 11.5. Macros
+# ====================================================================
+print("\n" + "=" * 60)
+print("11.5. Macros (requires DuckDB 1.5+)")
+print("=" * 60)
+
+from ducklake_pandas import create_ducklake_macro, drop_ducklake_macro
+
+create_ducklake_macro(
+    CATALOG, "add_one", "a + 1",
+    parameters=[{"name": "a", "type": "integer"}],
+)
+catalog = DuckLakeCatalog(CATALOG)
+print("Macros:", catalog.list_macros()["macro_name"].tolist())
+
+con = duckdb.connect()
+con.execute("LOAD ducklake")
+con.execute(f"ATTACH 'ducklake:sqlite:{CATALOG}' AS lake (DATA_PATH '{DATAPATH}')")
+print("add_one(41) =", con.execute("SELECT lake.add_one(41)").fetchone()[0])
+con.close()
+
+drop_ducklake_macro(CATALOG, "add_one")
 
 
 # ====================================================================
@@ -369,10 +415,82 @@ create_ducklake_schema(CATALOG, "staging")
 print("Created 'staging' schema")
 create_ducklake_table(CATALOG, "raw_data", {"x": "INTEGER"}, schema="staging")
 print("Created staging.raw_data")
-drop_ducklake_table(CATALOG, "raw_data", schema="staging")
-print("Dropped staging.raw_data")
+rename_ducklake_table(CATALOG, "raw_data", "raw_events", schema="staging")
+print("Renamed staging.raw_data -> staging.raw_events")
+drop_ducklake_table(CATALOG, "raw_events", schema="staging")
+print("Dropped staging.raw_events")
 drop_ducklake_schema(CATALOG, "staging")
 print("Dropped 'staging' schema")
+
+
+# ====================================================================
+# 12.5. Streaming ingestion
+# ====================================================================
+print("\n" + "=" * 60)
+print("12.5.  Streaming ingestion")
+print("=" * 60)
+
+from ducklake_pandas import DuckLakeStreamWriter
+
+with DuckLakeStreamWriter(
+    CATALOG, "events", flush_threshold=2, compact_on_close=False,
+) as writer:
+    writer.append(pd.DataFrame({
+        "ts":      pd.to_datetime(["2025-04-01 09:00:00", "2025-04-01 09:05:00"]),
+        "user_id": [1, 2],
+        "action":  ["login", "login"],
+        "region":  ["us", "eu"],
+    }))  # auto-flush
+    writer.append(pd.DataFrame({
+        "ts":      pd.to_datetime(["2025-04-01 09:10:00"]),
+        "user_id": [1],
+        "action":  ["click"],
+        "region":  ["us"],
+    }))  # flushes on close
+print(f"Streamed {writer.total_rows} rows in {writer.flush_count} flushes")
+
+
+# ====================================================================
+# 12.6. Registering external Parquet files
+# ====================================================================
+print("\n" + "=" * 60)
+print("12.6.  add_files_ducklake")
+print("=" * 60)
+
+from ducklake_pandas import add_files_ducklake
+
+ext_path = os.path.join(WORKDIR, "external.parquet")
+pd.DataFrame({
+    "ts":      pd.to_datetime(["2025-05-01 10:00:00", "2025-05-01 10:05:00"]),
+    "user_id": [1, 2],
+    "action":  ["signup", "signup"],
+    "region":  ["us", "eu"],
+}).to_parquet(ext_path)
+added = add_files_ducklake(CATALOG, "events", [ext_path])
+print(f"Registered {added} external file(s); events row count: {len(read_ducklake(CATALOG, 'events'))}")
+
+
+# ====================================================================
+# 12.7. Compaction
+# ====================================================================
+print("\n" + "=" * 60)
+print("12.7.  rewrite_data_files")
+print("=" * 60)
+
+from datetime import datetime, timedelta, timezone
+from ducklake_pandas import (
+    merge_adjacent_files_ducklake,
+    cleanup_old_files_ducklake,
+)
+
+n_before = len(DuckLakeCatalog(CATALOG).list_files("events"))
+merge_adjacent_files_ducklake(CATALOG, "events", min_file_size=1, max_file_size=10_000_000)
+n_after = len(DuckLakeCatalog(CATALOG).list_files("events"))
+print(f"events: {n_before} files -> {n_after} files")
+
+future = datetime.now(timezone.utc) + timedelta(days=1)
+removed = cleanup_old_files_ducklake(CATALOG, older_than=future)
+print(f"Cleaned up {len(removed)} retired data files")
 
 
 # ====================================================================

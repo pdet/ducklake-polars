@@ -538,6 +538,9 @@ class TestWriteEdgeCases:
             assert result[f"col_{i}"].to_list() == [i]
 
     def test_write_boolean_stats(self, make_write_catalog):
+        """DuckDB does not emit min/max stats for boolean columns; we
+        match that behavior so our catalogs are byte-identical to ones
+        written by the C++ extension."""
         cat = make_write_catalog()
         df = pl.DataFrame({"flag": [True, False, True]})
 
@@ -548,8 +551,8 @@ class TestWriteEdgeCases:
         )
 
         assert stats is not None
-        assert stats[0] == "false"
-        assert stats[1] == "true"
+        assert stats[0] is None
+        assert stats[1] is None
 
     def test_snapshot_progression(self, make_write_catalog):
         """Each write creates a new snapshot."""

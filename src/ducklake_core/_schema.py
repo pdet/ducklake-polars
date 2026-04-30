@@ -51,6 +51,36 @@ _SIMPLE_TYPE_MAP: dict[str, pa.DataType] = {
     "GEOMETRY": pa.binary(),
     "VARIANT": pa.string(),
     "UNKNOWN": pa.string(),
+    # Per-shape geometry types (DuckLake spatial extension) — all WKB.
+    "POINT": pa.binary(),
+    "LINESTRING": pa.binary(),
+    "POLYGON": pa.binary(),
+    "MULTIPOINT": pa.binary(),
+    "MULTILINESTRING": pa.binary(),
+    "MULTIPOLYGON": pa.binary(),
+    "GEOMETRYCOLLECTION": pa.binary(),
+    "POINT_Z": pa.binary(),
+    "LINESTRING_Z": pa.binary(),
+    "POLYGON_Z": pa.binary(),
+    "MULTIPOINT_Z": pa.binary(),
+    "MULTILINESTRING_Z": pa.binary(),
+    "MULTIPOLYGON_Z": pa.binary(),
+    "GEOMETRYCOLLECTION_Z": pa.binary(),
+    "POINT_M": pa.binary(),
+    "LINESTRING_M": pa.binary(),
+    "POLYGON_M": pa.binary(),
+    "MULTIPOINT_M": pa.binary(),
+    "MULTILINESTRING_M": pa.binary(),
+    "MULTIPOLYGON_M": pa.binary(),
+    "GEOMETRYCOLLECTION_M": pa.binary(),
+    "POINT_ZM": pa.binary(),
+    "LINESTRING_ZM": pa.binary(),
+    "POLYGON_ZM": pa.binary(),
+    "MULTIPOINT_ZM": pa.binary(),
+    "MULTILINESTRING_ZM": pa.binary(),
+    "MULTIPOLYGON_ZM": pa.binary(),
+    "GEOMETRYCOLLECTION_ZM": pa.binary(),
+    "WKB_BLOB": pa.binary(),
     # DuckDB internal type names (lowercase, as stored in ducklake_column.column_type)
     "INT8": pa.int8(),
     "INT16": pa.int16(),
@@ -208,6 +238,54 @@ def arrow_type_to_duckdb(dtype: pa.DataType) -> str:
 
     msg = f"Cannot map Arrow type {dtype} to DuckDB type"
     raise ValueError(msg)
+
+
+# Map common DuckDB SQL type names → DuckLake-canonical type names. DuckLake
+# stores types using its own short names (``int32``, ``int64``, ``varchar``,
+# ``float64``, ``timestamp_us``…); when a user passes a SQL alias we accept
+# it but persist the canonical form so DuckDB's ducklake reader can parse it.
+_DUCKLAKE_TYPE_ALIASES: dict[str, str] = {
+    "tinyint": "int8",
+    "smallint": "int16",
+    "int": "int32",
+    "integer": "int32",
+    "bigint": "int64",
+    "hugeint": "int128",
+    "utinyint": "uint8",
+    "usmallint": "uint16",
+    "uinteger": "uint32",
+    "uint": "uint32",
+    "ubigint": "uint64",
+    "uhugeint": "uint128",
+    "real": "float32",
+    "float": "float32",
+    "double": "float64",
+    "double precision": "float64",
+    "string": "varchar",
+    "text": "varchar",
+    "bytea": "blob",
+    "bool": "boolean",
+    "timestamp_us": "timestamp_us",
+    "timestamp without time zone": "timestamp",
+    "timestamp with time zone": "timestamptz",
+    "datetime": "timestamp",
+    "time without time zone": "time",
+    "time with time zone": "timetz",
+}
+
+
+def to_ducklake_type(type_str: str) -> str:
+    """Canonicalize a DuckDB / SQL type string to its DuckLake form.
+
+    Examples
+    --------
+    >>> to_ducklake_type("INTEGER")  # 'int32'
+    >>> to_ducklake_type("varchar")  # 'varchar' (already canonical)
+    """
+    s = type_str.strip().lower()
+    if s.startswith("decimal"):
+        return s  # decimal(p, s) — pass through with original parameters
+    return _DUCKLAKE_TYPE_ALIASES.get(s, s)
 
 
 def resolve_column_type(

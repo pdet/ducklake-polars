@@ -4,8 +4,38 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Any
+
+
+_WAL_LOCK = threading.Lock()
+_WAL_ENABLED_PATHS: set[str] = set()
+
+
+def _ensure_wal(abs_path: str) -> None:
+    """Flip a SQLite catalog to WAL mode at most once per process per path.
+
+    WAL allows concurrent readers alongside one writer; without it, a reader
+    racing a writer can surface as a ``disk I/O error``. The mode is persisted
+    in the file header so subsequent opens inherit it.
+    """
+    if abs_path in _WAL_ENABLED_PATHS or not os.path.exists(abs_path):
+        return
+    with _WAL_LOCK:
+        if abs_path in _WAL_ENABLED_PATHS:
+            return
+        try:
+            con = sqlite3.connect(abs_path, timeout=30)
+            try:
+                con.execute("PRAGMA journal_mode=WAL")
+            finally:
+                con.close()
+            _WAL_ENABLED_PATHS.add(abs_path)
+        except sqlite3.OperationalError:
+            # Best-effort — if the file is locked elsewhere, the next caller
+            # will retry.
+            pass
 
 
 @dataclass
@@ -17,9 +47,17 @@ class SQLiteBackend:
     _data_path: str | None = None
 
     def connect(self) -> sqlite3.Connection:
-        """Open a read-only SQLite connection."""
+        """Open a read-only SQLite connection.
+
+        Uses a regular (not URI ``mode=ro``) connection so the ``-wal`` /
+        ``-shm`` files can be opened for shared-memory coordination when the
+        catalog is in WAL mode. We never issue writes on this handle, so the
+        practical effect is the same; ``mode=ro`` would cause "unable to open
+        database file" when a writer is concurrently active.
+        """
         abs_path = os.path.abspath(self.path)
-        return sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
+        _ensure_wal(abs_path)
+        return sqlite3.connect(abs_path, timeout=30)
 
     def connect_writable(self) -> sqlite3.Connection:
         """Open a read-write SQLite connection.
@@ -36,6 +74,7 @@ class SQLiteBackend:
 
         bootstrap_catalog(self.path, data_path=self._data_path)
         abs_path = os.path.abspath(self.path)
+        _ensure_wal(abs_path)
         con = sqlite3.connect(abs_path, timeout=30)
         con.isolation_level = None  # Manual transaction management
         con.execute("BEGIN")
@@ -104,6 +143,7 @@ class PostgreSQLBackend:
 
     connection_string: str
     placeholder: str = "%s"
+    _data_path: str | None = None
 
     def _import_psycopg2(self) -> Any:
         """Import psycopg2, raising a clear error if not installed."""
@@ -126,8 +166,19 @@ class PostgreSQLBackend:
         return _PsycopgConnectionWrapper(con)
 
     def connect_writable(self) -> Any:
-        """Open a read-write PostgreSQL connection via psycopg2."""
+        """Open a read-write PostgreSQL connection via psycopg2.
+
+        If the DuckLake catalog tables are not present yet, the
+        connection target is bootstrapped first (matching the SQLite
+        backend's behaviour).
+        """
         psycopg2 = self._import_psycopg2()
+        if self._data_path is not None:
+            from ducklake_core._bootstrap import bootstrap_catalog_postgres
+
+            bootstrap_catalog_postgres(
+                self.connection_string, data_path=self._data_path,
+            )
         con = psycopg2.connect(self.connection_string)
         # autocommit=False (default) — caller manages transactions via commit()
         return _PsycopgConnectionWrapper(con)
@@ -279,7 +330,10 @@ def create_backend(
         or "host=" in lower
         or "dbname=" in lower
     ):
-        return PostgreSQLBackend(connection_string=path.strip())
+        return PostgreSQLBackend(
+            connection_string=path.strip(),
+            _data_path=data_path,
+        )
     if lower.endswith(".duckdb") or lower.startswith("duckdb:"):
         clean = path.strip()
         if clean.lower().startswith("duckdb:"):
