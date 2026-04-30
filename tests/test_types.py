@@ -468,7 +468,7 @@ class TestFloatEdgeCases:
 
         result = (
             scan_ducklake(cat.metadata_path, "test")
-            .filter(pl.col("a") > 0)
+            .filter(pl.col("a").is_not_nan() & (pl.col("a") > 0))
             .collect()
         )
         result = result.sort("a")

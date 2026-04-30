@@ -112,7 +112,7 @@ def _create_v03_legacy_catalog(db_path: str, data_path: str) -> None:
             nulls_allowed BIGINT DEFAULT 1, parent_column BIGINT
         );
         INSERT INTO ducklake_column VALUES
-            (0, 0, NULL, 0, 0, 'a', 'INTEGER', NULL, NULL, 1, NULL);
+            (0, 0, NULL, 0, 0, 'a', 'int32', NULL, NULL, 1, NULL);
 
         -- v0.3 ducklake_data_file: has partial_file_info, no partial_max
         CREATE TABLE ducklake_data_file (
@@ -351,7 +351,8 @@ def test_migrated_catalog_readable_by_duckdb(tmp_path):
     con.install_extension("ducklake")
     con.load_extension("ducklake")
     con.execute(
-        f"ATTACH 'ducklake:sqlite:{db_path}' AS d (DATA_PATH '{data_path}')"
+        f"ATTACH 'ducklake:sqlite:{db_path}' AS d "
+        f"(DATA_PATH '{data_path}', OVERRIDE_DATA_PATH true)"
     )
     # The table from the legacy catalog is visible
     tables = con.execute(

@@ -161,8 +161,9 @@ def test_table_scoped_option_we_write_duckdb_reads(tmp_path):
     con = duckdb.connect()
     _attach(con, path, data_path)
     rows = con.execute(
-        "SELECT option_value FROM ducklake_options('d', 'main', 't') "
-        "WHERE option_name = 'parquet_compression'"
+        "SELECT value FROM ducklake_options('d') "
+        "WHERE option_name = 'parquet_compression' "
+        "AND scope = 'TABLE' AND scope_entry = 'main.t'"
     ).fetchall()
     con.close()
     assert ("zstd",) in rows
@@ -243,6 +244,12 @@ def test_duckdb_update_polars_reads(tmp_path):
     path, data_path = _make_table(tmp_path)
     con = duckdb.connect()
     _attach(con, path, data_path)
+    # DuckDB 1.5+ inlines deletes by default; we don't yet read inlined
+    # delete tables, so force a traditional delete file.
+    try:
+        con.execute("CALL ducklake_set_option('d', 'data_inlining_row_limit', '0')")
+    except duckdb.Error:
+        pass
     con.execute("UPDATE d.t SET v = 'X' WHERE id = 2")
     con.close()
 
@@ -263,6 +270,12 @@ def test_duckdb_merge_polars_reads(tmp_path):
     path, data_path = _make_table(tmp_path)
     con = duckdb.connect()
     _attach(con, path, data_path)
+    # DuckDB 1.5+ inlines deletes by default; we don't yet read inlined
+    # delete tables, so force a traditional delete file.
+    try:
+        con.execute("CALL ducklake_set_option('d', 'data_inlining_row_limit', '0')")
+    except duckdb.Error:
+        pass
     con.execute(
         "MERGE INTO d.t AS tgt USING (VALUES (2, 'X'), (4, 'd')) "
         "AS src(id, v) ON tgt.id = src.id "
@@ -312,7 +325,7 @@ def test_duckdb_rewrite_data_files_polars_reads(tmp_path):
 
     con = duckdb.connect()
     _attach(con, path, data_path)
-    con.execute("CALL ducklake_rewrite_data_files('d', 'main.t')")
+    con.execute("CALL ducklake_rewrite_data_files('d', 't')")
     con.close()
 
     df = read_ducklake(path, "t", data_path=data_path).sort("id")

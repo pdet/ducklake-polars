@@ -164,8 +164,33 @@ def migrate_v03_to_v04(con: Any, *, backend: str) -> None:
     )
 
 
+_MIGRATE_V10_DDL: list[str] = [
+    """CREATE TABLE IF NOT EXISTS ducklake_view (
+        view_id BIGINT, view_uuid VARCHAR,
+        begin_snapshot BIGINT, end_snapshot BIGINT,
+        schema_id BIGINT, view_name VARCHAR,
+        dialect VARCHAR, sql VARCHAR, column_aliases VARCHAR
+    )""",
+    """CREATE TABLE IF NOT EXISTS ducklake_table_stats (
+        table_id BIGINT, record_count BIGINT,
+        next_row_id BIGINT, file_size_bytes BIGINT
+    )""",
+    """CREATE TABLE IF NOT EXISTS ducklake_table_column_stats (
+        table_id BIGINT, column_id BIGINT,
+        contains_null BIGINT, contains_nan BIGINT,
+        min_value VARCHAR, max_value VARCHAR, extra_stats VARCHAR
+    )""",
+    """CREATE TABLE IF NOT EXISTS ducklake_files_scheduled_for_deletion (
+        data_file_id BIGINT, path VARCHAR,
+        path_is_relative BIGINT, schedule_start TIMESTAMP
+    )""",
+]
+
+
 def migrate_v04_to_v10(con: Any, *, backend: str) -> None:
-    """Bring a v0.4 catalog up to v1.0 (just a version-row bump)."""
+    """Bring a v0.4 catalog up to v1.0 (add missing 1.0 tables, version bump)."""
+    for ddl in _MIGRATE_V10_DDL:
+        con.execute(ddl)
     ph = "?" if backend == "sqlite" else "%s"
     con.execute(
         f"UPDATE ducklake_metadata SET value = {ph} WHERE key = 'version'",

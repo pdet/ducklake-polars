@@ -251,7 +251,7 @@ def test_duckdb_reads_catalog_option(tmp_path):
         f"ATTACH 'ducklake:sqlite:{path}' AS d (DATA_PATH '{data_path}')"
     )
     rows = con.execute(
-        "SELECT option_value FROM ducklake_options('d') "
+        "SELECT value FROM ducklake_options('d') "
         "WHERE option_name = 'parquet_compression'"
     ).fetchall()
     con.close()

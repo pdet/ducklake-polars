@@ -3886,10 +3886,12 @@ class DuckLakeCatalogWriter:
             default_str: str | None = default_expression
             default_value_type: str | None = "expression"
             default_value_dialect: str | None = default_dialect
+            initial_default: str | None = None
         else:
             default_str = str(default) if default is not None else None
             default_value_type = "literal"
             default_value_dialect = None
+            initial_default = default_str
 
         if self._is_v04:
             con.execute(
@@ -3900,7 +3902,7 @@ class DuckLakeCatalogWriter:
                 "VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                 [
                     new_col_id, new_snap, table_id, new_col_order,
-                    column_name, duckdb_type, default_str, default_str, True,
+                    column_name, duckdb_type, initial_default, default_str, True,
                     default_value_type, default_value_dialect,
                 ],
             )
