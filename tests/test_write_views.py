@@ -229,10 +229,7 @@ class TestCreateView:
             "SELECT id, name FROM main.test WHERE id > 1",
         )
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -254,10 +251,7 @@ class TestCreateView:
         """DuckDB creates a view, polars can see it in metadata."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -424,10 +418,7 @@ class TestDropView:
 
         drop_ducklake_view(cat.metadata_path, "test_view")
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -444,10 +435,7 @@ class TestDropView:
         """DuckDB drops a view, polars confirms it in metadata."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -535,10 +523,7 @@ class TestDropView:
         )
 
         # DuckDB can query the view
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")

@@ -217,10 +217,7 @@ class TestUpdateDuckDBInterop:
         con = duckdb.connect()
         con.install_extension("ducklake")
         con.load_extension("ducklake")
-        if cat.backend == "sqlite":
-            attach_source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            attach_source = f"ducklake:postgres:{cat.metadata_path}"
+        attach_source = cat.attach_source()
         con.execute(
             f"ATTACH '{attach_source}' AS ducklake "
             f"(DATA_PATH '{cat.data_path}', DATA_INLINING_ROW_LIMIT 0)"

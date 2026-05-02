@@ -209,10 +209,7 @@ def test_we_set_tag_duckdb_reads_comment(make_write_catalog):
     con.install_extension("ducklake")
     con.load_extension("ducklake")
 
-    if cat.backend == "sqlite":
-        source = f"ducklake:sqlite:{path}"
-    else:
-        source = f"ducklake:postgres:{path}"
+    source = cat.attach_source()
 
     con.execute(
         f"ATTACH '{source}' AS ducklake (DATA_PATH '{dp}')"

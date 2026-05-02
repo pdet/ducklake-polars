@@ -13,12 +13,33 @@ import pytest
 
 def _get_backends():
     """Return pytest parameters for available backends."""
-    backends = [pytest.param("sqlite", id="sqlite")]
+    backends = [
+        pytest.param("sqlite", id="sqlite"),
+        pytest.param("duckdb", id="duckdb"),
+    ]
     if os.environ.get("DUCKLAKE_PG_DSN"):
         backends.append(
             pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
         )
     return backends
+
+
+def _metadata_path_for(backend: str, tmp_path: Any, stem: str = "test") -> str:
+    """Return a per-backend metadata path."""
+    if backend == "sqlite":
+        return str(tmp_path / f"{stem}.ducklake")
+    if backend == "duckdb":
+        return str(tmp_path / f"{stem}.duckdb")
+    return os.environ["DUCKLAKE_PG_DSN"]
+
+
+def _attach_source_for(backend: str, metadata_path: str) -> str:
+    """Return the DuckDB ATTACH source string for the given backend."""
+    if backend == "sqlite":
+        return f"ducklake:sqlite:{metadata_path}"
+    if backend == "duckdb":
+        return f"ducklake:duckdb:{metadata_path}"
+    return f"ducklake:postgres:{metadata_path}"
 
 
 @dataclass
@@ -53,6 +74,8 @@ class DuckLakeTestCatalog:
             self._con.install_extension("sqlite_scanner")
             self._con.load_extension("sqlite_scanner")
             attach_source = f"ducklake:sqlite:{self.metadata_path}"
+        elif self.backend == "duckdb":
+            attach_source = f"ducklake:duckdb:{self.metadata_path}"
         else:
             self._cleanup_postgres_tables()
             attach_source = f"ducklake:postgres:{self.metadata_path}"
@@ -112,6 +135,12 @@ class DuckLakeTestCatalog:
                 return con.execute(sql, params or []).fetchone()
             finally:
                 con.close()
+        elif self.backend == "duckdb":
+            con = duckdb.connect(self.metadata_path, read_only=True)
+            try:
+                return con.execute(sql, params or []).fetchone()
+            finally:
+                con.close()
         else:
             import psycopg2
 
@@ -133,6 +162,10 @@ class DuckLakeTestCatalog:
             self._con.close()
             self._closed = True
 
+    def attach_source(self) -> str:
+        """Return the DuckDB ATTACH source string for this catalog's backend."""
+        return _attach_source_for(self.backend, self.metadata_path)
+
     def __enter__(self) -> "DuckLakeTestCatalog":
         return self
 
@@ -150,12 +183,7 @@ def ducklake_catalog(request, tmp_path):
     reading with ducklake-dataframe to release the file lock.
     """
     backend = request.param
-
-    if backend == "sqlite":
-        metadata_path = str(tmp_path / "test.ducklake")
-    else:
-        metadata_path = os.environ["DUCKLAKE_PG_DSN"]
-
+    metadata_path = _metadata_path_for(backend, tmp_path)
     data_path = str(tmp_path / "data")
 
     catalog = DuckLakeTestCatalog(
@@ -204,12 +232,7 @@ def ducklake_catalog_inline(request, tmp_path):
     ``DUCKLAKE_PG_DSN`` is set).
     """
     backend = request.param
-
-    if backend == "sqlite":
-        metadata_path = str(tmp_path / "test.ducklake")
-    else:
-        metadata_path = os.environ["DUCKLAKE_PG_DSN"]
-
+    metadata_path = _metadata_path_for(backend, tmp_path)
     data_path = str(tmp_path / "data")
 
     catalog = DuckLakeTestCatalog(
@@ -243,8 +266,12 @@ class WriteCatalogHelper:
 
     metadata_path: str
     data_path: str
-    backend: str  # "sqlite" or "postgres"
+    backend: str  # "sqlite", "duckdb", or "postgres"
     inline_limit: int = 0
+
+    def attach_source(self) -> str:
+        """Return the DuckDB ATTACH source string for this catalog's backend."""
+        return _attach_source_for(self.backend, self.metadata_path)
 
     # -- metadata queries ------------------------------------------------
 
@@ -254,6 +281,12 @@ class WriteCatalogHelper:
             import sqlite3
 
             con = sqlite3.connect(self.metadata_path)
+            try:
+                return con.execute(sql, params or []).fetchone()
+            finally:
+                con.close()
+        elif self.backend == "duckdb":
+            con = duckdb.connect(self.metadata_path, read_only=True)
             try:
                 return con.execute(sql, params or []).fetchone()
             finally:
@@ -283,6 +316,12 @@ class WriteCatalogHelper:
                 return con.execute(sql, params or []).fetchall()
             finally:
                 con.close()
+        elif self.backend == "duckdb":
+            con = duckdb.connect(self.metadata_path, read_only=True)
+            try:
+                return con.execute(sql, params or []).fetchall()
+            finally:
+                con.close()
         else:
             import psycopg2
 
@@ -305,10 +344,7 @@ class WriteCatalogHelper:
     ) -> pl.DataFrame:
         """Read a table back using DuckDB's DuckLake extension."""
         limit = inline_limit if inline_limit is not None else self.inline_limit
-        if self.backend == "sqlite":
-            source = f"ducklake:sqlite:{self.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{self.metadata_path}"
+        source = _attach_source_for(self.backend, self.metadata_path)
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -331,10 +367,7 @@ class WriteCatalogHelper:
     ) -> pl.DataFrame:
         """Read a table in a non-default schema using DuckDB."""
         limit = inline_limit if inline_limit is not None else self.inline_limit
-        if self.backend == "sqlite":
-            source = f"ducklake:sqlite:{self.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{self.metadata_path}"
+        source = _attach_source_for(self.backend, self.metadata_path)
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -392,14 +425,13 @@ class WriteCatalogHelper:
         if self.backend == "sqlite":
             rows = self.query_all(f'PRAGMA table_info("{table_name}")')
             return [(r[1], r[2]) for r in rows]
-        else:
-            rows = self.query_all(
-                "SELECT column_name, data_type "
-                "FROM information_schema.columns "
-                "WHERE table_name = ? ORDER BY ordinal_position",
-                [table_name],
-            )
-            return [(r[0], r[1]) for r in rows]
+        rows = self.query_all(
+            "SELECT column_name, data_type "
+            "FROM information_schema.columns "
+            "WHERE table_name = ? ORDER BY ordinal_position",
+            [table_name],
+        )
+        return [(r[0], r[1]) for r in rows]
 
 
 def _create_write_catalog(
@@ -409,10 +441,7 @@ def _create_write_catalog(
     inline_limit: int = 20,
 ) -> WriteCatalogHelper:
     """Create a DuckLake catalog via DuckDB and return a WriteCatalogHelper."""
-    if backend == "sqlite":
-        metadata_path = str(tmp_path / "write_test.ducklake")
-    else:
-        metadata_path = os.environ["DUCKLAKE_PG_DSN"]
+    metadata_path = _metadata_path_for(backend, tmp_path, stem="write_test")
 
     data_path = str(tmp_path / "data")
     os.makedirs(data_path, exist_ok=True)
@@ -431,10 +460,7 @@ def _create_write_catalog(
     con.install_extension("ducklake")
     con.load_extension("ducklake")
 
-    if backend == "sqlite":
-        attach_source = f"ducklake:sqlite:{metadata_path}"
-    else:
-        attach_source = f"ducklake:postgres:{metadata_path}"
+    attach_source = _attach_source_for(backend, metadata_path)
 
     inline_opt = (
         f", DATA_INLINING_ROW_LIMIT {inline_limit}"

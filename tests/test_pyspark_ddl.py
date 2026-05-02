@@ -18,6 +18,57 @@ from pyspark.sql import SparkSession
 from pyspark.sql.types import IntegerType, StringType, LongType
 
 
+def _get_backends():
+    """Return pytest parameters for available backends."""
+    backends = [
+        pytest.param("sqlite", id="sqlite"),
+        pytest.param("duckdb", id="duckdb"),
+    ]
+    if os.environ.get("DUCKLAKE_PG_DSN"):
+        backends.append(
+            pytest.param("postgres", id="postgres", marks=pytest.mark.postgres)
+        )
+    return backends
+
+
+def _meta_path(backend: str, tmpdir: str) -> str:
+    if backend == "sqlite":
+        return os.path.join(tmpdir, "test.ducklake")
+    if backend == "duckdb":
+        return os.path.join(tmpdir, "test.duckdb")
+    return os.environ["DUCKLAKE_PG_DSN"]
+
+
+def _attach_source(backend: str, meta: str) -> str:
+    if backend == "sqlite":
+        return f"ducklake:sqlite:{meta}"
+    if backend == "duckdb":
+        return f"ducklake:duckdb:{meta}"
+    return f"ducklake:postgres:{meta}"
+
+
+def _cleanup_postgres(meta: str) -> None:
+    """Drop all tables in the PostgreSQL public schema for test isolation."""
+    import psycopg2
+
+    con = psycopg2.connect(meta)
+    try:
+        con.autocommit = True
+        cur = con.cursor()
+        try:
+            cur.execute(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            )
+            tables = [row[0] for row in cur.fetchall()]
+            for table in tables:
+                safe = table.replace('"', '""')
+                cur.execute(f'DROP TABLE IF EXISTS "{safe}" CASCADE')
+        finally:
+            cur.close()
+    finally:
+        con.close()
+
+
 @pytest.fixture(scope="module")
 def spark():
     """Create a local Spark session for testing."""
@@ -33,19 +84,23 @@ def spark():
     session.stop()
 
 
-@pytest.fixture
-def ducklake_catalog():
-    """Create a DuckLake catalog with a test table."""
+@pytest.fixture(params=_get_backends())
+def ducklake_catalog(request):
+    """Create a DuckLake catalog with a test table, parametrized over backends."""
+    backend = request.param
     tmpdir = tempfile.mkdtemp(prefix="ducklake_pyspark_ddl_")
-    meta = os.path.join(tmpdir, "test.ducklake")
+    meta = _meta_path(backend, tmpdir)
     data = os.path.join(tmpdir, "data")
     os.makedirs(data)
+
+    if backend == "postgres":
+        _cleanup_postgres(meta)
 
     con = duckdb.connect()
     con.install_extension("ducklake")
     con.load_extension("ducklake")
     con.execute(
-        f"ATTACH 'ducklake:sqlite:{meta}' AS lake "
+        f"ATTACH '{_attach_source(backend, meta)}' AS lake "
         f"(DATA_PATH '{data}', DATA_INLINING_ROW_LIMIT 0)"
     )
     con.execute(
@@ -59,21 +114,27 @@ def ducklake_catalog():
     yield meta, data, tmpdir
 
     shutil.rmtree(tmpdir, ignore_errors=True)
+    if backend == "postgres":
+        _cleanup_postgres(meta)
 
 
-@pytest.fixture
-def empty_catalog():
+@pytest.fixture(params=_get_backends())
+def empty_catalog(request):
     """Create an empty DuckLake catalog (just the 'main' schema)."""
+    backend = request.param
     tmpdir = tempfile.mkdtemp(prefix="ducklake_pyspark_ddl_empty_")
-    meta = os.path.join(tmpdir, "test.ducklake")
+    meta = _meta_path(backend, tmpdir)
     data = os.path.join(tmpdir, "data")
     os.makedirs(data)
+
+    if backend == "postgres":
+        _cleanup_postgres(meta)
 
     con = duckdb.connect()
     con.install_extension("ducklake")
     con.load_extension("ducklake")
     con.execute(
-        f"ATTACH 'ducklake:sqlite:{meta}' AS lake "
+        f"ATTACH '{_attach_source(backend, meta)}' AS lake "
         f"(DATA_PATH '{data}', DATA_INLINING_ROW_LIMIT 0)"
     )
     # Create a table so the catalog is initialized
@@ -87,6 +148,8 @@ def empty_catalog():
     yield meta, data, tmpdir
 
     shutil.rmtree(tmpdir, ignore_errors=True)
+    if backend == "postgres":
+        _cleanup_postgres(meta)
 
 
 # ==================================================================

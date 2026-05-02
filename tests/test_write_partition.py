@@ -397,10 +397,7 @@ class TestPartitionedDuckDBInterop:
         cat = make_write_catalog()
 
         # Use DuckDB to create partitioned table structure
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -426,10 +423,7 @@ class TestPartitionedDuckDBInterop:
         cat = make_write_catalog()
 
         # Use DuckDB to create table, partition, and insert initial data
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")

@@ -175,8 +175,10 @@ class TestDeletionInliningAlter:
     def test_delete_after_add_column(self, make_write_catalog):
         """Delete from inlined data that was inserted before a column was added."""
         cat = make_write_catalog()
-        if cat.backend == "postgres":
-            pytest.xfail("Postgres backend: inlined delete after add_column returns 0")
+        if cat.backend in ("postgres", "duckdb"):
+            pytest.xfail(
+                f"{cat.backend} backend: inlined delete after add_column returns 0"
+            )
         df = pl.DataFrame({"a": [1, 2, 3]})
 
         write_ducklake(

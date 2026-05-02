@@ -30,6 +30,8 @@ def _reopen_duckdb(metadata_path, data_path, backend="sqlite"):
     con.load_extension("ducklake")
     if backend == "postgres":
         source = f"ducklake:postgres:{metadata_path}"
+    elif backend == "duckdb":
+        source = f"ducklake:duckdb:{metadata_path}"
     else:
         source = f"ducklake:sqlite:{metadata_path}"
     con.execute(

@@ -172,10 +172,7 @@ class TestAddColumn:
         """DuckDB adds a column, polars reads correctly."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            attach_source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            attach_source = f"ducklake:postgres:{cat.metadata_path}"
+        attach_source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -323,10 +320,7 @@ class TestDropColumn:
         """DuckDB drops a column, polars reads correctly."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            attach_source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            attach_source = f"ducklake:postgres:{cat.metadata_path}"
+        attach_source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -555,10 +549,7 @@ class TestSetType:
         cat = make_write_catalog()
 
         # Create and populate via DuckDB
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")

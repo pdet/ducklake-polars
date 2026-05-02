@@ -1061,10 +1061,7 @@ def _duckdb_read(cat, table: str, *, schema: str | None = None) -> list[tuple]:
     con = duckdb.connect()
     con.install_extension("ducklake")
     con.load_extension("ducklake")
-    if cat.backend == "sqlite":
-        source = f"ducklake:sqlite:{cat.metadata_path}"
-    else:
-        source = f"ducklake:postgres:{cat.metadata_path}"
+    source = cat.attach_source()
     con.execute(
         f"ATTACH '{source}' AS ducklake (DATA_PATH '{cat.data_path}', DATA_INLINING_ROW_LIMIT 0)"
     )

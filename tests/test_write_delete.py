@@ -340,10 +340,7 @@ class TestDuckDBWritePolarsDelete:
         cat = make_write_catalog()
 
         # Write data with DuckDB
-        if cat.backend == "sqlite":
-            attach_source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            attach_source = f"ducklake:postgres:{cat.metadata_path}"
+        attach_source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")

@@ -134,10 +134,7 @@ class TestThresholdBasedRewrite:
 
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            src = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            src = f"ducklake:postgres:{cat.metadata_path}"
+        src = cat.attach_source()
         con = duckdb.connect()
         con.install_extension("ducklake")
         con.load_extension("ducklake")

@@ -30,11 +30,7 @@ class TestSchemaCaseInsensitive:
         con = duckdb.connect()
         con.install_extension("ducklake")
         con.load_extension("ducklake")
-        source = (
-            f"ducklake:sqlite:{cat.metadata_path}"
-            if cat.backend == "sqlite"
-            else f"ducklake:postgres:{cat.metadata_path}"
-        )
+        source = cat.attach_source()
         con.execute(
             f"ATTACH '{source}' AS ducklake "
             f"(DATA_PATH '{cat.data_path}', DATA_INLINING_ROW_LIMIT 0)"
@@ -56,11 +52,7 @@ class TestSchemaCaseInsensitive:
         con = duckdb.connect()
         con.install_extension("ducklake")
         con.load_extension("ducklake")
-        source = (
-            f"ducklake:sqlite:{cat.metadata_path}"
-            if cat.backend == "sqlite"
-            else f"ducklake:postgres:{cat.metadata_path}"
-        )
+        source = cat.attach_source()
         con.execute(
             f"ATTACH '{source}' AS ducklake "
             f"(DATA_PATH '{cat.data_path}', DATA_INLINING_ROW_LIMIT 0)"
@@ -122,11 +114,7 @@ class TestSchemaCaseInsensitive:
         con = duckdb.connect()
         con.install_extension("ducklake")
         con.load_extension("ducklake")
-        source = (
-            f"ducklake:sqlite:{cat.metadata_path}"
-            if cat.backend == "sqlite"
-            else f"ducklake:postgres:{cat.metadata_path}"
-        )
+        source = cat.attach_source()
         con.execute(
             f"ATTACH '{source}' AS ducklake "
             f"(DATA_PATH '{cat.data_path}', DATA_INLINING_ROW_LIMIT 0)"

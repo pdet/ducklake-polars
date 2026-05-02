@@ -176,10 +176,7 @@ class TestRenameColumn:
         """DuckDB renames a column, polars reads correctly."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -333,10 +330,7 @@ class TestDropTable:
 
         drop_ducklake_table(cat.metadata_path, "test")
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -353,10 +347,7 @@ class TestDropTable:
         """DuckDB drops a table, polars confirms it's gone."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -477,10 +468,7 @@ class TestCreateSchema:
         """DuckDB creates a schema, polars creates a table in it."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -621,10 +609,7 @@ class TestDropSchema:
 
         drop_ducklake_schema(cat.metadata_path, "myschema")
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -641,10 +626,7 @@ class TestDropSchema:
         """DuckDB drops a schema, polars can no longer use it."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -829,10 +811,7 @@ class TestRenameTable:
         assert pdf["a"].to_list() == [1, 2]
 
         # Old name should fail
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")
@@ -849,10 +828,7 @@ class TestRenameTable:
         """DuckDB renames a table, polars reads by new name."""
         cat = make_write_catalog()
 
-        if cat.backend == "sqlite":
-            source = f"ducklake:sqlite:{cat.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{cat.metadata_path}"
+        source = cat.attach_source()
 
         con = duckdb.connect()
         con.install_extension("ducklake")

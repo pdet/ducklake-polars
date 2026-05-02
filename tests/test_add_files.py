@@ -58,7 +58,7 @@ def _write_arrow_parquet(path: str, table: pa.Table) -> str:
 
 def _base_dir(catalog) -> str:
     """Return the base directory for writing external Parquet files."""
-    if catalog.backend == "sqlite":
+    if catalog.backend in ("sqlite", "duckdb"):
         return os.path.dirname(catalog.metadata_path)
     return catalog.data_path
 
@@ -556,9 +556,7 @@ class TestAddFilesInterop:
         if catalog.backend == "sqlite":
             con.install_extension("sqlite_scanner")
             con.load_extension("sqlite_scanner")
-            source = f"ducklake:sqlite:{catalog.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{catalog.metadata_path}"
+        source = catalog.attach_source()
 
         con.execute(
             f"ATTACH \'{source}\' AS ducklake "
@@ -593,9 +591,7 @@ class TestAddFilesInterop:
         if catalog.backend == "sqlite":
             con.install_extension("sqlite_scanner")
             con.load_extension("sqlite_scanner")
-            source = f"ducklake:sqlite:{catalog.metadata_path}"
-        else:
-            source = f"ducklake:postgres:{catalog.metadata_path}"
+        source = catalog.attach_source()
 
         con.execute(
             f"ATTACH \'{source}\' AS ducklake "
