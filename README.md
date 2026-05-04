@@ -622,7 +622,7 @@ See the [PySpark wiki page](https://github.com/pdet/ducklake-dataframe/wiki/PySp
 - **MAP type** — Polars reads MAP columns as `List(Struct(key, value))` due to a Polars Parquet reader limitation.
 - **INTERVAL type** — Polars cannot read DuckDB's `month_day_millisecond_interval` Parquet representation; reads of INTERVAL columns are unsupported.
 
-See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for the full compatibility matrix.
+See [docs/compatibility.md](docs/compatibility.md) for the full compatibility matrix versus DuckDB's native DuckLake extension, broken down per wrapper (Polars / Pandas / PySpark).
 
 ## Package structure
 

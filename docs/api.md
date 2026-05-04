@@ -81,6 +81,8 @@ write_ducklake(
     max_retries: int = 3,
     retry_wait_ms: float = 100,
     retry_backoff: float = 2.0,
+    schema_evolution: str = "strict",
+    union_handling: str = "error",
 ) -> None
 ```
 
@@ -102,6 +104,8 @@ Write a Polars DataFrame to a DuckLake table.
 | `max_retries` | `int` | `3` | Max transaction retries on conflict |
 | `retry_wait_ms` | `float` | `100` | Initial wait between retries (ms) |
 | `retry_backoff` | `float` | `2.0` | Backoff multiplier for retries |
+| `schema_evolution` | `str` | `"strict"` | `"strict"` to fail on column mismatch; `"merge"` auto-adds new DataFrame columns to the table |
+| `union_handling` | `str` | `"error"` | How to handle Polars/Arrow union types when writing |
 
 ---
 
@@ -187,7 +191,10 @@ merge_ducklake(
     on: str | list[str],
     *,
     when_matched_update: dict[str, object] | bool | None = None,
+    when_matched_delete: bool = False,
     when_not_matched_insert: bool = True,
+    when_not_matched_by_source_delete: bool = False,
+    when_not_matched_by_source_update: dict[str, object] | None = None,
     schema: str = "main",
     data_path: str | Path | None = None,
     data_inlining_row_limit: int = 0,
@@ -204,7 +211,10 @@ Merge a source DataFrame into an existing DuckLake table (upsert). Implemented a
 |---|---|---|---|
 | `on` | `str \| list[str]` | required | Column(s) to match on |
 | `when_matched_update` | `dict \| bool \| None` | `None` | `None` = leave matched rows; `True` = replace; `dict` = update specific columns |
+| `when_matched_delete` | `bool` | `False` | Delete target rows that match a source row |
 | `when_not_matched_insert` | `bool` | `True` | Insert unmatched source rows |
+| `when_not_matched_by_source_delete` | `bool` | `False` | Delete target rows that have no matching source row |
+| `when_not_matched_by_source_update` | `dict \| None` | `None` | Update target rows that have no matching source row |
 
 **Returns:** `tuple[int, int]` — `(rows_updated, rows_inserted)`.
 
@@ -372,7 +382,7 @@ Change a column's type using a DuckDB type string (e.g., `"BIGINT"`, `"VARCHAR"`
 alter_ducklake_set_partitioned_by(
     path: str | Path,
     table: str,
-    columns: list[str],
+    columns: list[str] | list[tuple[str, str]],
     *,
     schema: str = "main",
     data_path: str | Path | None = None,
@@ -381,7 +391,7 @@ alter_ducklake_set_partitioned_by(
 ) -> None
 ```
 
-Set identity-transform partitioning. Future inserts write one Parquet file per unique combination of partition column values (Hive-style layout).
+Set partitioning on a table. Pass either a list of column names (each gets the `identity` transform) or a list of `(column, transform)` tuples. Supported transforms: `"identity"`, `"year"`, `"month"`, `"day"`, `"hour"` — `year`/`month`/`day`/`hour` require a date or timestamp column. Future inserts write one Parquet file per unique combination of partition values (Hive-style layout). DuckDB-DuckLake's `bucket(N, col)` and `truncate(N, col)` transforms are not supported.
 
 ---
 
@@ -635,6 +645,205 @@ Rewrite data files for compaction — merge small files and remove deleted rows.
 
 ---
 
+#### `merge_adjacent_files_ducklake`
+
+```python
+merge_adjacent_files_ducklake(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    target_file_size: int | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> int
+```
+
+Lightweight compaction (DuckLake catalog v1.0+, requires DuckDB ≥ 1.5 for full DuckDB-side interop). Merges already-adjacent small files within a partition without rewriting unrelated files. Retired source files are queued for deletion via `cleanup_old_files_ducklake`.
+
+**Returns:** `int` — new snapshot ID, or `-1` if nothing to merge.
+
+---
+
+#### `cleanup_old_files_ducklake`
+
+```python
+cleanup_old_files_ducklake(
+    path: str | Path,
+    *,
+    older_than: datetime | None = None,
+    data_path: str | Path | None = None,
+) -> int
+```
+
+Drain the deletion queue populated by compaction / rewrite. Only physically deletes Parquet files whose scheduled-delete timestamp is before `older_than` (defaults to *now*). Pair with `rewrite_data_files_ducklake` or `merge_adjacent_files_ducklake`.
+
+**Returns:** `int` — files deleted.
+
+---
+
+#### `delete_orphaned_files_ducklake`
+
+```python
+delete_orphaned_files_ducklake(
+    path: str | Path,
+    *,
+    data_path: str | Path | None = None,
+    dry_run: bool = False,
+) -> list[str]
+```
+
+Find files in the data directory that the catalog does not reference and delete them (or list them when `dry_run=True`). Differs from `vacuum_ducklake` by scanning the filesystem rather than the catalog.
+
+---
+
+### Change Data Feed
+
+#### `scan_ducklake_changes` (Polars-only)
+
+```python
+scan_ducklake_changes(
+    path: str | Path,
+    table: str,
+    *,
+    start_version: int,
+    end_version: int,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> pl.LazyFrame
+```
+
+Lazy variant of `read_ducklake_changes`. Returns rows with a `change_type` column: `"insert"`, `"delete"`, `"update_preimage"`, `"update_postimage"`.
+
+#### `read_ducklake_changes`
+
+```python
+read_ducklake_changes(
+    path: str | Path,
+    table: str,
+    *,
+    start_version: int,
+    end_version: int,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> pl.DataFrame  # or pd.DataFrame in ducklake_pandas
+```
+
+Eager change feed between two snapshots. `start_version` is exclusive, `end_version` inclusive. Passing `start > end` raises `ValueError`; an `end` past the current snapshot raises a "snapshot not found" error.
+
+PySpark variant takes `spark` as the first argument and uses `start_snapshot=` / `end_snapshot=`.
+
+---
+
+### Streaming Ingestion
+
+#### `DuckLakeStreamWriter` (Polars and Pandas)
+
+```python
+from ducklake_polars import DuckLakeStreamWriter  # or ducklake_pandas
+
+with DuckLakeStreamWriter(
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    flush_threshold: int = 10_000,
+    compact_on_close: bool = True,
+    schema_evolution: str = "strict",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) as writer:
+    writer.append(batch)        # auto-flushes at flush_threshold rows
+    writer.flush()              # force flush
+print(writer.total_rows, writer.flush_count)
+```
+
+Buffered micro-batch writer. Each flush is one snapshot. On exception, unflushed rows in the buffer are dropped — already-flushed batches stay visible. Not available in `ducklake_pyspark`.
+
+---
+
+### Macros (DuckLake v1.0+)
+
+```python
+create_ducklake_macro(
+    path: str | Path,
+    name: str,
+    sql: str,
+    *,
+    schema: str = "main",
+    or_replace: bool = False,
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None
+
+drop_ducklake_macro(
+    path: str | Path,
+    name: str,
+    *,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+    author: str | None = None,
+    commit_message: str | None = None,
+) -> None
+```
+
+Create/drop a DuckLake macro. Not available in `ducklake_pyspark`. Requires a v1.0 catalog; raises an explicit version error against pre-1.0 catalogs.
+
+---
+
+### Catalog Options (DuckLake v1.0+)
+
+```python
+set_ducklake_option(
+    path: str | Path,
+    key: str,
+    value: str | None,
+    *,
+    scope: str = "global",
+    table: str | None = None,
+    column: str | None = None,
+    schema: str = "main",
+    data_path: str | Path | None = None,
+) -> None
+```
+
+Set a catalog/table/column option. `scope` is one of `"global"`, `"table"`, or `"column"`. Pass `value=None` to clear an option. Not available in `ducklake_pyspark`.
+
+---
+
+### Catalog Migration
+
+```python
+from ducklake_polars import migrate_catalog
+# also re-exported from ducklake_pandas and ducklake_pyspark
+
+new_version = migrate_catalog(path: str | Path) -> str
+```
+
+Bring a v0.3 / v0.4 catalog up to **v1.0** in place. Idempotent. Migration is opt-in — never triggered automatically on read or write. After migration, v1.0-only operations (`merge_adjacent_files_ducklake`, macros, expression sort keys / defaults, custom column tag keys) become available.
+
+---
+
+### Top-level catalog helpers
+
+These return `pl.DataFrame` (Polars), `pd.DataFrame` (Pandas), or `pyspark.sql.DataFrame` (PySpark). They are thin wrappers around the corresponding `DuckLakeCatalog` methods, useful when you don't want to construct a catalog object.
+
+| Function | Description |
+|---|---|
+| `list_schemas(path, *, snapshot_version=, data_path=)` | All schemas |
+| `list_tables(path, *, schema="main", snapshot_version=, data_path=)` | Tables in a schema |
+| `list_views(path, *, schema="main", data_path=)` | Views in a schema |
+| `get_view(path, name, *, schema="main", data_path=)` | View definition (SQL) |
+| `list_snapshots(path, *, data_path=)` | All snapshots |
+| `snapshot_changes(path, *, snapshot_id=, data_path=)` | Per-snapshot change summary |
+| `catalog_info(path, *, data_path=)` | Backend type, data path, format version |
+| `table_info(path, table, *, schema="main", data_path=)` | Per-column metadata for a single table |
+
+---
+
 ### Catalog Inspection
 
 #### `DuckLakeCatalog` (Polars)
@@ -811,12 +1020,133 @@ All other functions (DDL, tags, views, maintenance, merge) share the same signat
 
 ---
 
+## ducklake_pyspark
+
+The PySpark API mirrors the write/DDL surface of the Polars and Pandas wrappers but exposes it on top of a PySpark `SparkSession`.
+
+### Differences from Polars / Pandas
+
+| Feature | Polars / Pandas | PySpark |
+|---|---|---|
+| Read entry point | `scan_ducklake` / `read_ducklake(path, table)` | `read_ducklake(spark, path, table)` — first arg is a `SparkSession` |
+| Lazy evaluation | `scan_ducklake` (Polars) | Spark DataFrames are lazy by default |
+| Predicate pushdown | Polars optimizer / Pandas `predicate=` callable | Spark's native Parquet pushdown — no `predicate=` param |
+| DML predicates | `pl.Expr` / callable | SQL string (`"id > 10"`) |
+| `create_ducklake_table` schema | `pl.Schema` / `dict[str, str]` | `pyspark.sql.types.StructType` |
+| Change data feed | `start_version` / `end_version` | `start_snapshot` / `end_snapshot` |
+| `DuckLakeCatalog` class | ✅ | ❌ — use the top-level helpers (`list_schemas`, `list_tables`, `table_info`, `list_snapshots`, `snapshot_changes`, `catalog_info`, `get_view`) |
+| `DuckLakeStreamWriter` | ✅ | ❌ |
+| `merge_adjacent_files_ducklake` | ✅ | ❌ — only `rewrite_data_files_ducklake` |
+| `cleanup_old_files_ducklake` / `delete_orphaned_files_ducklake` | ✅ | ❌ |
+| `create_ducklake_macro` / `drop_ducklake_macro` | ✅ | ❌ |
+| `set_ducklake_option` | ✅ | ❌ |
+
+### `read_ducklake` (PySpark)
+
+```python
+from pyspark.sql import SparkSession
+from ducklake_pyspark import read_ducklake
+
+read_ducklake(
+    spark: SparkSession,
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    columns: list[str] | None = None,
+    snapshot_version: int | None = None,
+    snapshot_time: datetime | str | None = None,
+    data_path: str | Path | None = None,
+) -> pyspark.sql.DataFrame
+```
+
+### `write_ducklake` (PySpark)
+
+```python
+from ducklake_pyspark import write_ducklake
+
+write_ducklake(
+    df: pyspark.sql.DataFrame,
+    path: str | Path,
+    table: str,
+    *,
+    schema: str = "main",
+    mode: str = "error",
+    data_path: str | Path | None = None,
+    ...
+) -> None
+```
+
+### `delete_ducklake` (PySpark)
+
+```python
+from ducklake_pyspark import delete_ducklake
+
+delete_ducklake(
+    path: str | Path,
+    table: str,
+    predicate: str,
+    *,
+    schema: str = "main",
+    ...
+) -> int
+```
+
+`predicate` is a SQL string evaluated against table columns:
+
+```python
+deleted = delete_ducklake("catalog.ducklake", "users", "id > 10")
+```
+
+### `create_ducklake_table` (PySpark)
+
+```python
+from pyspark.sql.types import StructType, StructField, LongType, StringType
+from ducklake_pyspark import create_ducklake_table
+
+create_ducklake_table(
+    "catalog.ducklake",
+    "events",
+    StructType([
+        StructField("id", LongType(), True),
+        StructField("name", StringType(), True),
+    ]),
+)
+```
+
+### `read_ducklake_changes` (PySpark)
+
+```python
+from ducklake_pyspark import read_ducklake_changes
+
+read_ducklake_changes(
+    spark, path, table,
+    *, start_snapshot: int, end_snapshot: int, schema: str = "main", ...
+) -> pyspark.sql.DataFrame
+```
+
+### Shared surface
+
+`update_ducklake`, `merge_ducklake`, `create_table_as_ducklake`, `add_files_ducklake`, all `alter_*` functions, `drop_ducklake_table`, `rename_ducklake_table`, `create_ducklake_schema`, `drop_ducklake_schema`, `create_ducklake_view`, `drop_ducklake_view`, the four tag functions, `expire_snapshots`, `vacuum_ducklake`, `rewrite_data_files_ducklake`, and the top-level catalog helpers (`list_schemas`, `list_tables`, `list_views`, `list_snapshots`, `snapshot_changes`, `catalog_info`, `get_view`, `table_info`) all behave the same as in the Polars wrapper. `migrate_catalog` and `TransactionConflictError` are re-exported.
+
+---
+
 ## `TransactionConflictError`
 
 ```python
 from ducklake_polars import TransactionConflictError
 # or
 from ducklake_pandas import TransactionConflictError
+# or
+from ducklake_pyspark import TransactionConflictError
 ```
 
 Raised when a write operation detects a concurrent modification conflict. See [Concurrency](concurrency.md) for details.
+
+## `UnsupportedUnionTypeError`
+
+```python
+from ducklake_polars import UnsupportedUnionTypeError
+```
+
+Raised when a write would produce a DuckDB `UNION` typed column. The wrappers do not map UNION types — see the [Compatibility page](compatibility.md). Re-exported from `ducklake_polars` only.

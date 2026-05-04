@@ -1,5 +1,5 @@
 site_name: ducklake-dataframe
-site_description: Polars & pandas wrappers for DuckLake catalogs
+site_description: Polars, Pandas, and PySpark wrappers for DuckLake catalogs
 theme:
   name: material
 nav:
@@ -9,3 +9,4 @@ nav:
   - Object Storage: object-storage.md
   - Time Travel: time-travel.md
   - Concurrency: concurrency.md
+  - Compatibility: compatibility.md
