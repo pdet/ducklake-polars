@@ -14,8 +14,11 @@
 # 5. Explore DDL, partitioning, views, tags, and catalog maintenance
 
 # %%
-# Install/upgrade to latest versions (uncomment when running as a notebook):
-# !pip install -U "ducklake-dataframe[pyspark]"
+# Install/upgrade to latest versions (uncomment when running as a notebook).
+# On Google Colab, pin PySpark 3.5.x — Colab ships Java 11, while PySpark
+# 4.x requires Java 17+. If you're on a machine with Java 17+, you can drop
+# the version pin.
+# !pip install -U "ducklake-dataframe[pyspark]" "pyspark>=3.5,<4.0"
 # !pip install duckdb==1.5.2
 
 # %%

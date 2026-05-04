@@ -217,8 +217,9 @@ catalog = DuckLakeCatalog("catalog.ducklake")
 first_data_snapshot = int(catalog.snapshots()["snapshot_id"].sort()[1])  # skip the bootstrap snapshot
 df_at_first = read_ducklake("catalog.ducklake", "users", snapshot_version=first_data_snapshot)
 
-# Or read at a specific timestamp
-df_ts = read_ducklake("catalog.ducklake", "users", snapshot_time="2025-06-15T10:30:00")
+# Or read at a specific timestamp — pull one from the catalog so this is reproducible
+snapshot_ts = catalog.snapshots()["snapshot_time"].sort()[1]
+df_ts = read_ducklake("catalog.ducklake", "users", snapshot_time=snapshot_ts)
 ```
 
 ### 6. Inspect the catalog
